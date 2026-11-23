@@ -1,0 +1,13 @@
+#!/bin/sh
+# ~/.xinitrc
+fifo=${XDG_RUNTIME_DIR:-/tmp}/xwr.fifo
+rm -f "$fifo"
+mkfifo -m 600 "$fifo"
+
+xsetroot -cursor_name left_ptr &
+# start bars, wallpaper, etc. here, each with "&"
+
+xwinkeys > "$fifo" &
+
+# last command: the session ends when the router exits
+xwinrouter < "$fifo" | xwincomposer -g 4 > "$fifo"
