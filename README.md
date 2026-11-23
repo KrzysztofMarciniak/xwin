@@ -11,13 +11,14 @@ Small programs, plain text, one job each. Written in C89, linked only against `l
 | `xwinkeys` | Key bindings and **the only configuration**. Sends its settings at startup, then turns key presses into commands. |
 | `xwinbar` | Status bar. Shows the last line printed by an `sh` script. |
 
-```
-xwinkeys --settings, keys--> FIFO --> xwinrouter --events--> xwincomposer
-                              ^                                  |
-                              +-----------commands---------------+
+Everything they say to each other is one line of plain text.
 
-xwinbar <-- sh script          (independent: a dock window the router tiles around)
-```
+1. `xwinkeys` grabs the shortcut keys listed in `config.h`. Only those: all other typing goes straight to the focused window. At startup it writes its settings to the FIFO, then one command line (for example `focus next`) for every shortcut you press.
+2. `xwinrouter` reads the FIFO. Commands it knows (`focus`, `close`, `tag`, `view`, `spawn`, `geom`, ...) it executes itself. Anything else it prints on its stdout as a `bind` event. It also prints an event for everything that happens on screen: window opened, window closed, focus changed, usable area changed.
+3. `xwincomposer` reads those events from the router's stdout, decides where every window goes, and writes `geom`, `focus` and `raise` commands to the FIFO. The router reads them there and applies them.
+4. `xwinbar` is independent. It runs a shell script, shows the last line the script prints, and tells the router to keep that strip of the screen free.
+
+The loop is closed by the last line of `xinitrc.example`: the router's stdout is piped into the composer, and the composer's stdout goes back into the FIFO that the router reads.
 
 Only `xwinkeys` includes `config.h`. The router and the composer have no config file and no compile-time options. They are configured at runtime by `set` commands, so changing a setting never means rebuilding them.
 
@@ -54,8 +55,8 @@ cc -std=c89 -pedantic -Wall -Wextra $(pkg-config --cflags xcb) \
    -o xwinbar xwinbar.c $(pkg-config --libs xcb)
 
 install -m 755 xwinrouter xwincomposer xwinkeys xwinbar /usr/local/bin/
-install -d /usr/local/share/xwin
-install -m 755 xwinbar.sh /usr/local/share/xwin/
+install -d /usr/local/share/xwinrouter
+install -m 755 xwinbar.sh /usr/local/share/xwinrouter/
 
 cp xinitrc.example ~/.xinitrc
 ```
@@ -73,7 +74,7 @@ rm -f "$fifo"
 mkfifo -m 600 "$fifo"
 
 xsetroot -cursor_name left_ptr &
-xwinbar /usr/local/share/xwin/xwinbar.sh &
+xwinbar /usr/local/share/xwinrouter/xwinbar.sh &
 
 # sends settings and key bindings from config.h
 xwinkeys > "$fifo" &
