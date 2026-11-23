@@ -256,6 +256,128 @@ Floating and fullscreen windows are not tiled. On startup it sends `dump`, so it
 
 Any program works if it prints `dump` first, reads the events above, and prints `geom`, `focus` and `raise` commands. Replace `xwincomposer` to change the policy completely. Likewise `xwinkeys`: anything that writes command lines into the FIFO can replace it.
 
+## Minimal examples
+
+Two bare replacements, to show how little a part needs to be. Both were tested: the composer by feeding it events, the key program under Xvfb with injected key presses.
+
+### A composer in 36 lines of sh
+
+Master column on the left, everything else stacked on the right. It ignores tags, fullscreen, settings and layouts. Floating windows are left alone. It prints `dump` first, reads events, prints commands, and nothing else.
+
+```sh
+#!/bin/sh
+# Bare composer: master column on the left, the rest stacked on the right.
+# Ignores tags, fullscreen and layouts. Usage: xwinrouter < fifo | ./composer.sh > fifo
+wins= x=0 y=0 w=800 h=600
+
+relayout() {
+	set -- $wins
+	n=$#
+	[ "$n" -eq 0 ] && return
+	if [ "$n" -eq 1 ]; then
+		echo "geom $1 $x $y $w $h"
+		return
+	fi
+	mw=$((w * 55 / 100))
+	ch=$((h / (n - 1)))
+	echo "geom $1 $x $y $mw $h"
+	shift
+	i=0
+	for id; do
+		echo "geom $id $((x + mw)) $((y + i * ch)) $((w - mw)) $ch"
+		i=$((i + 1))
+	done
+}
+
+echo dump
+while read -r ev a b c d; do
+	case $ev in
+	map)	[ "$c" = 0 ] && wins="$wins $a"      # a=id c=floating
+		relayout; echo "focus $a" ;;
+	unmap)	new=
+		for id in $wins; do [ "$id" != "$a" ] && new="$new $id"; done
+		wins=$new; relayout ;;
+	workarea) x=$a y=$b w=$c h=$d; relayout ;;
+	enter)	echo "focus $a" ;;
+	esac
+done
+```
+
+Use it by replacing the last line of `~/.xinitrc`:
+
+```sh
+xwinrouter < "$fifo" | ./composer.sh > "$fifo"
+```
+
+### A key program in 56 lines of C
+
+Grabs five Super shortcuts and prints the command bound to each, one line per press. It sends no settings, so the router and composer run on their defaults. Caps Lock and Num Lock are not handled: with either on, the shortcuts do not fire.
+
+```c
+/* Bare xwinkeys: grabs Super+key, prints the bound command as one line.
+ * cc -o xwinkeys xwinkeys.c -lxcb      (needs X11/keysym.h, header only)
+ * Does not handle Caps Lock / Num Lock and sends no settings. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <xcb/xcb.h>
+#include <X11/keysym.h>
+
+#define SUPER XCB_MOD_MASK_4
+#define SHIFT XCB_MOD_MASK_SHIFT
+
+static const struct { unsigned int mod; unsigned long sym; const char *cmd; } keys[] = {
+	{ SUPER,         XK_Return, "spawn xterm" },
+	{ SUPER,         XK_j,      "focus next" },
+	{ SUPER,         XK_k,      "focus prev" },
+	{ SUPER,         XK_q,      "close" },
+	{ SUPER | SHIFT, XK_q,      "quit" },
+};
+#define N (sizeof keys / sizeof keys[0])
+
+int main(void)
+{
+	xcb_connection_t *c = xcb_connect(NULL, NULL);
+	const xcb_setup_t *setup = xcb_get_setup(c);
+	xcb_window_t root = xcb_setup_roots_iterator(setup).data->root;
+	int min = setup->min_keycode, max = setup->max_keycode, k;
+	xcb_get_keyboard_mapping_reply_t *m = xcb_get_keyboard_mapping_reply(c,
+	    xcb_get_keyboard_mapping(c, min, max - min + 1), NULL);
+	xcb_keysym_t *sym = xcb_get_keyboard_mapping_keysyms(m);
+	xcb_keycode_t code[N] = { 0 };
+	xcb_generic_event_t *ev;
+	size_t i;
+
+	for (i = 0; i < N; i++)
+		for (k = 0; k <= max - min; k++)
+			if (sym[k * m->keysyms_per_keycode] == keys[i].sym) {
+				code[i] = min + k;
+				xcb_grab_key(c, 1, root, keys[i].mod, code[i],
+				    XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+				break;
+			}
+	xcb_flush(c);
+
+	while ((ev = xcb_wait_for_event(c)) != NULL) {
+		if ((ev->response_type & ~0x80) == XCB_KEY_PRESS) {
+			xcb_key_press_event_t *e = (xcb_key_press_event_t *)ev;
+			for (i = 0; i < N; i++)
+				if (code[i] == e->detail && keys[i].mod == e->state) {
+					printf("%s\n", keys[i].cmd);
+					fflush(stdout);
+				}
+		}
+		free(ev);
+	}
+	return 0;
+}
+```
+
+```
+cc -o xwinkeys xwinkeys.c -lxcb
+```
+
+Run it like the real one: `./xwinkeys > "$fifo" &`. Any program that writes the same lines would do, including a shell script: `echo "view 2" > "$fifo"`.
+
 ## Design notes
 
 - Windows are not reparented. Borders are the client's own. Windows on other tags are moved off-screen, not unmapped.
