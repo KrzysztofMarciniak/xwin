@@ -41,7 +41,7 @@ static const char *settings[] = {
 
 /* modifier mask, unshifted keysym (XK_*), command line */
 static const struct key keys[] = {
-	{ MOD | SHIFT, XK_Return, "spawn xterm" },
+	{ MOD | SHIFT, XK_Return, "spawn xxt" },
 	{ MOD,         XK_d,      "spawn dmenu_run -m '0' -nb '#000000' -nf '#ffffff' "
 	                          "-sb '#ffffff' -sf '#000000'" },
 	{ MOD,         XK_Return, "zoom" },

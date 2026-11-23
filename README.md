@@ -33,6 +33,10 @@ commands, so changing a setting never means rebuilding them.
 Nothing else. `XDG_RUNTIME_DIR` is optional: `xinitrc.example` uses it for the
 FIFO and falls back to `/tmp` if it is not set. The programs never read it.
 
+### Creator's settings patch
+
+`apply_creator_patches.sh` patches config.h to a minimal setup: tile layout only, black and white, terminal is xxt. Run it in the source directory, then make xwinkeys and restart xwinkeys.
+
 ## Build
 
 With make:
