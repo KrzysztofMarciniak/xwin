@@ -8,6 +8,7 @@ through plain text. Written in C89.
 | `xwinrouter` | The window manager mechanism and the only program with the WM role. Manages windows, applies geometry it is told to apply, reports what happens. No layout, no keys, no focus policy. |
 | `xwincomposer` | Layout and focus policy. Reads router events, writes router commands. |
 | `xwinkeys` | Key bindings. Grabs keys and writes one command line per key press. |
+| `xwinbar` | Status bar
 
 ```
 xwinkeys ---commands---> FIFO ---> xwinrouter ---events---> xwincomposer
@@ -79,7 +80,7 @@ mkfifo -m 600 "$fifo"
 
 xsetroot -cursor_name left_ptr &
 # start bars, wallpaper, etc. here, each with "&"
-
+xwinbar /usr/local/bin/xwinbar.sh &
 xwinkeys > "$fifo" &
 
 # last command: the session ends when the router exits

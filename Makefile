@@ -5,7 +5,7 @@ XCB_CFLAGS = $(shell pkg-config --cflags xcb)
 XCB_LIBS   = $(shell pkg-config --libs xcb)
 PREFIX  ?= /usr/local
 
-all: xwinrouter xwinkeys xwincomposer
+all: xwinrouter xwinkeys xwincomposer xwinbar
 
 xwinrouter: xwinrouter.c config.h
 	$(CC) $(CFLAGS) $(XCB_CFLAGS) $(LDFLAGS) -o $@ xwinrouter.c $(XCB_LIBS)
@@ -13,14 +13,17 @@ xwinrouter: xwinrouter.c config.h
 xwinkeys: xwinkeys.c config.h
 	$(CC) $(CFLAGS) $(XCB_CFLAGS) $(LDFLAGS) -o $@ xwinkeys.c $(XCB_LIBS)
 
+xwinbar:  xwinbar.c
+	$(CC) $(CFLAGS) $(XCB_CLFAGS) $(LDFLAGS) -o $@ xwinbar.c $(XCB_LIBS)
+
 xwincomposer: xwincomposer.c config.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ xwincomposer.c
 
 install: all
 	install -d $(DESTDIR)$(PREFIX)/bin
-	install -m 755 xwinrouter xwinkeys xwincomposer $(DESTDIR)$(PREFIX)/bin
+	install -m 755 xwinrouter xwinkeys xwinbar xwincomposer xwinbar.sh $(DESTDIR)$(PREFIX)/bin
 
 clean:
-	rm -f xwinrouter xwinkeys xwincomposer
+	rm -f xwinrouter xwinkeys xwincomposer xwinbar
 
 .PHONY: all install clean

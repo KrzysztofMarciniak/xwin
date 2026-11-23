@@ -6,7 +6,7 @@ mkfifo -m 600 "$fifo"
 
 xsetroot -cursor_name left_ptr &
 # start bars, wallpaper, etc. here, each with "&"
-
+xwinbar /usr/local/bin/xwinbar.sh &
 xwinkeys > "$fifo" &
 
 # last command: the session ends when the router exits
