@@ -6,9 +6,19 @@
  *
  * usage: xwincomposer [-l layout] [-r master%] [-n nmaster] [-g gap]
  *
- * Defaults and the list of layouts come from config.h.
- * Handles "bind" lines from the router's keys:
+ * It has no config file. Defaults are below; xwinkeys sends the real
+ * settings, which arrive here as "bind set ..." lines:
+ *   set layouts NAME...      layouts that "layout next" cycles through
+ *   set layout NAME          current layout
+ *   set ratio N              master area in percent (10..90)
+ *   set master N             windows in the master area
+ *   set gap N                pixels around every window
+ *   set focus_follows_mouse 0|1
+ *   set focus_new_window 0|1
+ * and key commands:
  *   layout NAME|next   ratio +N|-N   master +N|-N   gap +N|-N   zoom
+ *
+ * Layouts: tile, bstack, spiral, grid, mono.
  */
 #define _POSIX_C_SOURCE 200112L
 #include <stdio.h>
@@ -16,36 +26,12 @@
 #include <string.h>
 #include <unistd.h>
 
-#define XWR_COMPOSER
-#include "config.h"
-
 #define MAXW 256
+#define NLAYOUTS 5
 
 enum { L_TILE, L_BSTACK, L_SPIRAL, L_GRID, L_MONO };
 
-struct layout {
-	const char *name;
-	int kind;
-};
-
-static const struct layout layouts[] = {
-#if LAYOUT_TILE
-	{ "tile",   L_TILE },
-#endif
-#if LAYOUT_BSTACK
-	{ "bstack", L_BSTACK },
-#endif
-#if LAYOUT_SPIRAL
-	{ "spiral", L_SPIRAL },
-#endif
-#if LAYOUT_GRID
-	{ "grid",   L_GRID },
-#endif
-#if LAYOUT_MONO
-	{ "mono",   L_MONO },
-#endif
-};
-#define NLAYOUTS (sizeof layouts / sizeof layouts[0])
+static const char *lname[NLAYOUTS] = { "tile", "bstack", "spiral", "grid", "mono" };
 
 struct win {
 	unsigned long id;
@@ -53,8 +39,11 @@ struct win {
 };
 
 static struct win ws[MAXW];
-static int nw, view = 1, mode, ready;
-static int gap = GAP, ratio = MASTER_RATIO, nmaster = NMASTER;
+static int nw, view = 1, ready;
+static int enabled[NLAYOUTS] = { 1, 1, 1, 1, 1 };   /* which layouts may be used */
+static int mode = L_TILE;                            /* current layout */
+static int gap = 0, ratio = 55, nmaster = 1;
+static int follow_mouse = 1, focus_new = 1;
 static int wx, wy, ww, wh;
 static unsigned long focus;
 
@@ -70,12 +59,17 @@ static int find(unsigned long id)
 
 static int layout_index(const char *name)
 {
-	size_t i;
+	int i;
 
 	for (i = 0; i < NLAYOUTS; i++)
-		if (!strcmp(layouts[i].name, name))
-			return (int)i;
+		if (!strcmp(lname[i], name))
+			return i;
 	return -1;
+}
+
+static int clamp(int v, int lo, int hi)
+{
+	return v < lo ? lo : v > hi ? hi : v;
 }
 
 static void put(unsigned long id, int x, int y, int w, int h)
@@ -186,7 +180,7 @@ static void relayout(void)
 			idx[n++] = i;
 	if (!n)
 		return;
-	switch (layouts[mode].kind) {
+	switch (mode) {
 	case L_BSTACK: lay_bstack(idx, n); break;
 	case L_SPIRAL: lay_spiral(idx, n); break;
 	case L_GRID:   lay_grid(idx, n);   break;
@@ -220,28 +214,93 @@ static void zoom(void)
 	}
 }
 
+/* switch to layout k if it is enabled; returns 1 if it changed anything */
+static int use_layout(int k)
+{
+	if (k < 0 || !enabled[k])
+		return 0;
+	mode = k;
+	return 1;
+}
+
+static int next_layout(void)
+{
+	int i, k;
+
+	for (i = 1; i <= NLAYOUTS; i++) {
+		k = (mode + i) % NLAYOUTS;
+		if (enabled[k]) {
+			mode = k;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* "set KEY VALUE..." (the text after "set ") */
+static int setting(char *l)
+{
+	char *k = strtok(l, " \t"), *v;
+	int e[NLAYOUTS], i, any = 0, x;
+
+	if (!k)
+		return 0;
+	if (!strcmp(k, "layouts")) {
+		for (i = 0; i < NLAYOUTS; i++)
+			e[i] = 0;
+		while ((v = strtok(NULL, " \t")) != NULL)
+			if ((x = layout_index(v)) >= 0) {
+				e[x] = 1;
+				any = 1;
+			}
+		if (!any)
+			return 0;
+		for (i = 0; i < NLAYOUTS; i++)
+			enabled[i] = e[i];
+		if (!enabled[mode])
+			next_layout();
+		return 1;
+	}
+	if ((v = strtok(NULL, " \t")) == NULL)
+		return 0;
+	if (!strcmp(k, "layout"))
+		return use_layout(layout_index(v));
+	if (!strcmp(k, "ratio"))
+		ratio = clamp(atoi(v), 10, 90);
+	else if (!strcmp(k, "master"))
+		nmaster = clamp(atoi(v), 0, 50);
+	else if (!strcmp(k, "gap"))
+		gap = clamp(atoi(v), 0, 200);
+	else if (!strcmp(k, "focus_follows_mouse"))
+		follow_mouse = !!atoi(v);
+	else if (!strcmp(k, "focus_new_window"))
+		focus_new = !!atoi(v);
+	else
+		return 0;
+	return 1;
+}
+
 static void bind(char *l)
 {
 	char s[32];
-	int a, k;
+	int a;
 
-	if (sscanf(l, "layout %31s", s) == 1) {
-		if (!strcmp(s, "next"))
-			mode = (mode + 1) % (int)NLAYOUTS;
-		else if ((k = layout_index(s)) >= 0)
-			mode = k;
-		else
-			return;                       /* layout not compiled in */
+	if (!strncmp(l, "set ", 4)) {
+		if (!setting(l + 4))
+			return;
+	} else if (sscanf(l, "layout %31s", s) == 1) {
+		if (!strcmp(s, "next")) {
+			if (!next_layout())
+				return;
+		} else if (!use_layout(layout_index(s))) {
+			return;                       /* unknown or disabled */
+		}
 	} else if (sscanf(l, "ratio %d", &a) == 1) {
-		ratio += a;
-		if (ratio < 10) ratio = 10;
-		if (ratio > 90) ratio = 90;
+		ratio = clamp(ratio + a, 10, 90);
 	} else if (sscanf(l, "master %d", &a) == 1) {
-		nmaster += a;
-		if (nmaster < 0) nmaster = 0;
+		nmaster = clamp(nmaster + a, 0, 50);
 	} else if (sscanf(l, "gap %d", &a) == 1) {
-		gap += a;
-		if (gap < 0) gap = 0;
+		gap = clamp(gap + a, 0, 200);
 	} else if (!strncmp(l, "zoom", 4)) {
 		zoom();
 	} else {
@@ -266,7 +325,7 @@ static void handle(char *l)
 		ws[i].floating = b;
 		ws[i].fullscreen = 0;
 		relayout();
-		if (FOCUS_NEW_WINDOW && ready && a == view)
+		if (focus_new && ready && a == view)
 			printf("focus 0x%lx\n", id);
 	} else if (sscanf(l, "unmap %lx", &id) == 1) {
 		i = find(id);
@@ -305,7 +364,7 @@ static void handle(char *l)
 		wx = a; wy = b; ww = c; wh = d;
 		relayout();
 	} else if (sscanf(l, "enter %lx", &id) == 1) {
-		if (FOCUS_FOLLOWS_MOUSE && id != focus)
+		if (follow_mouse && id != focus)
 			printf("focus 0x%lx\n", id);
 	} else if (sscanf(l, "activate %lx", &id) == 1) {
 		if ((i = find(id)) >= 0) {
@@ -323,20 +382,14 @@ static void handle(char *l)
 int main(int argc, char **argv)
 {
 	char line[512], *nl;
-	int o, k;
+	int o;
 
-	mode = layout_index(DEFAULT_LAYOUT);
-	if (mode < 0)
-		mode = 0;
 	while ((o = getopt(argc, argv, "l:r:n:g:")) != -1) {
 		switch (o) {
-		case 'l':
-			if ((k = layout_index(optarg)) >= 0)
-				mode = k;
-			break;
-		case 'r': ratio = atoi(optarg); break;
-		case 'n': nmaster = atoi(optarg); break;
-		case 'g': gap = atoi(optarg); break;
+		case 'l': use_layout(layout_index(optarg)); break;
+		case 'r': ratio = clamp(atoi(optarg), 10, 90); break;
+		case 'n': nmaster = clamp(atoi(optarg), 0, 50); break;
+		case 'g': gap = clamp(atoi(optarg), 0, 200); break;
 		default:
 			fprintf(stderr, "usage: xwincomposer [-l layout] [-r pct] [-n nmaster] [-g gap]\n");
 			return 2;

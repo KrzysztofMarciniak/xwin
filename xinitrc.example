@@ -5,9 +5,10 @@ rm -f "$fifo"
 mkfifo -m 600 "$fifo"
 
 xsetroot -cursor_name left_ptr &
-# start bars, wallpaper, etc. here, each with "&"
-xwinbar /usr/local/bin/xwinbar.sh &
+xwinbar /usr/local/share/xwinrouter/xwinbar.sh &
+
+# sends the settings and key bindings from config.h to the router
 xwinkeys > "$fifo" &
 
 # last command: the session ends when the router exits
-xwinrouter < "$fifo" | xwincomposer -g 4 > "$fifo"
+xwinrouter < "$fifo" | xwincomposer > "$fifo"

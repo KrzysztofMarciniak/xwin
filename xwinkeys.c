@@ -1,8 +1,10 @@
 /*
- * xwinkeys - key bindings for xwinrouter (C89).
+ * xwinkeys - key bindings and configuration for xwinrouter (C89).
  *
- * Grabs the keys listed in config.h and writes the bound command, one line,
- * to stdout on every press. Point stdout at the router's FIFO:
+ * This is the only program that reads config.h. At startup it writes every
+ * line of settings[] to stdout, then it grabs the keys listed in keys[] and
+ * writes the bound command, one line, on every press. Point stdout at the
+ * router's FIFO:
  *
  *     xwinkeys > "$fifo" &
  *
@@ -31,7 +33,6 @@ struct key {
 	const char *cmd;
 };
 
-#define XWR_KEYS
 #include "config.h"
 
 static xcb_connection_t *conn;
@@ -108,6 +109,10 @@ int main(void)
 		xcb_screen_next(&it);
 	scr = it.data;
 	grab_keys();
+
+	for (i = 0; i < NELEM(settings); i++)
+		if (send_cmd(settings[i]) < 0)
+			return 0;
 
 	while ((ev = xcb_wait_for_event(conn)) != NULL) {
 		switch (ev->response_type & ~0x80) {

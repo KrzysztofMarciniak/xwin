@@ -1,22 +1,26 @@
 # xwinrouter
 
-A tiling window manager for X11 built from three small programs that talk
-through plain text. Written in C89.
+A tiling window manager for X11 built from small programs that talk through
+plain text. Written in C89.
 
 | Program | Job |
 | --- | --- |
 | `xwinrouter` | The window manager mechanism and the only program with the WM role. Manages windows, applies geometry it is told to apply, reports what happens. No layout, no keys, no focus policy. |
 | `xwincomposer` | Layout and focus policy. Reads router events, writes router commands. |
-| `xwinkeys` | Key bindings. Grabs keys and writes one command line per key press. |
-| `xwinbar` | Status bar
+| `xwinkeys` | Key bindings and **the only configuration**. Sends its settings to the others at startup, then turns key presses into commands. |
+| `xwinbar` | A simple status bar. Shows the last line printed by an `sh` script. |
 
 ```
-xwinkeys ---commands---> FIFO ---> xwinrouter ---events---> xwincomposer
-                           ^                                     |
-                           +-------------commands----------------+
+xwinkeys --settings, keys--> FIFO --> xwinrouter --events--> xwincomposer
+                              ^                                  |
+                              +-----------commands---------------+
+
+xwinbar <-- sh script          (independent: a dock window the router tiles around)
 ```
 
-All three include `config.h`, which is the one place for configuration.
+Only `xwinkeys` includes `config.h`. The router and the composer have no config
+file and no compile-time options; they are configured at runtime by `set`
+commands, so changing a setting never means rebuilding them.
 
 ## Requirements
 
@@ -24,6 +28,7 @@ All three include `config.h`, which is the one place for configuration.
 - `libxcb` with its headers (the only library that gets linked)
 - `X11/keysym.h` from xorgproto, used by `xwinkeys` (header only, gives the
   `XK_*` key names; nothing from libX11 is linked)
+- for `xwinbar`: a core X font. The X server's built-in `fixed` works.
 
 Nothing else. `XDG_RUNTIME_DIR` is optional: `xinitrc.example` uses it for the
 FIFO and falls back to `/tmp` if it is not set. The programs never read it.
@@ -37,35 +42,43 @@ make
 make install        # PREFIX=/usr/local by default
 ```
 
-By hand:
+By hand, one step at a time:
 
 ```
 # 1. check that xcb is found
 pkg-config --cflags --libs xcb
 
-# 2. compile the router (needs xcb)
+# 2. router (needs xcb)
 cc -std=c89 -pedantic -Wall -Wextra \
    $(pkg-config --cflags xcb) \
    -o xwinrouter xwinrouter.c \
    $(pkg-config --libs xcb)
 
-# 3. compile the key daemon (needs xcb and X11/keysym.h)
+# 3. composer (no libraries)
+cc -std=c89 -pedantic -Wall -Wextra -o xwincomposer xwincomposer.c
+
+# 4. key daemon (needs xcb, X11/keysym.h and config.h)
 cc -std=c89 -pedantic -Wall -Wextra \
    $(pkg-config --cflags xcb) \
    -o xwinkeys xwinkeys.c \
    $(pkg-config --libs xcb)
 
-# 4. compile the composer (no libraries)
-cc -std=c89 -pedantic -Wall -Wextra -o xwincomposer xwincomposer.c
+# 5. status bar (needs xcb)
+cc -std=c89 -pedantic -Wall -Wextra \
+   $(pkg-config --cflags xcb) \
+   -o xwinbar xwinbar.c \
+   $(pkg-config --libs xcb)
 
-# 5. install all three somewhere on your PATH
-install -m 755 xwinrouter xwinkeys xwincomposer /usr/local/bin/
+# 6. install
+install -m 755 xwinrouter xwincomposer xwinkeys xwinbar /usr/local/bin/
+install -d /usr/local/share/xwinrouter
+install -m 755 xwinbar.sh /usr/local/share/xwinrouter/
 
-# 6. install the session file
+# 7. session file
 cp xinitrc.example ~/.xinitrc
 ```
 
-All three programs include `config.h`, so after editing it redo steps 2 to 4.
+After editing `config.h` only step 4 has to be redone.
 
 ## Run
 
@@ -79,16 +92,17 @@ rm -f "$fifo"
 mkfifo -m 600 "$fifo"
 
 xsetroot -cursor_name left_ptr &
-# start bars, wallpaper, etc. here, each with "&"
-xwinbar /usr/local/bin/xwinbar.sh &
+xwinbar /usr/local/share/xwinrouter/xwinbar.sh &
+
+# sends the settings and key bindings from config.h to the router
 xwinkeys > "$fifo" &
 
 # last command: the session ends when the router exits
-xwinrouter < "$fifo" | xwincomposer -g 4 > "$fifo"
+xwinrouter < "$fifo" | xwincomposer > "$fifo"
 ```
 
-Then `startx`. Programs that are already open when the router starts are
-adopted.
+Then `startx`. Programs already open when the router starts are adopted. The
+bar can be started before or after the router.
 
 To try it without leaving your session, in a nested X server:
 
@@ -98,6 +112,7 @@ Xephyr :1 -screen 1280x800 &
 export DISPLAY=:1
 xwinkeys > fifo &
 xwinrouter < fifo | xwincomposer > fifo &
+xwinbar ./xwinbar.sh &
 xterm &
 ```
 
@@ -106,56 +121,45 @@ a line to the FIFO can control the window manager.
 
 ## Configuration
 
-Everything is in `config.h` and is compiled in. Edit, then rebuild.
+`config.h` has two tables and is read by `xwinkeys` only.
 
-### Features
+### `settings[]`
 
-| Setting | Effect |
-| --- | --- |
-| `ENABLE_FLOATING` | `0`: every window is tiled, dialogs too, and `float` does nothing |
-| `ENABLE_FULLSCREEN` | `0`: fullscreen requests from programs and the command are ignored |
-| `NTAGS` | `1`..`9`. `1` turns tagging off: `view` and `tag` do nothing, no tag keys are bound |
+Every line is sent to the FIFO when `xwinkeys` starts. To apply a changed
+config: edit, rebuild `xwinkeys` (step 4), restart it.
 
-### Layouts
+| Setting | For | Values |
+| --- | --- | --- |
+| `set border N` | router | border width in pixels |
+| `set color_focus RRGGBB` | router | focused border color |
+| `set color_normal RRGGBB` | router | other borders |
+| `set floating 0\|1` | router | `0`: every window is tiled, dialogs too, `float` does nothing |
+| `set fullscreen 0\|1` | router | `0`: fullscreen requests and the command are ignored |
+| `set tags N` | router | `1`..`9`. `1` switches tagging off: `view` and `tag` do nothing |
+| `set layouts NAME...` | composer | layouts that `layout next` cycles through; leave a name out to disable it |
+| `set layout NAME` | composer | layout to start with |
+| `set ratio N` | composer | master area in percent (10..90) |
+| `set master N` | composer | windows in the master area |
+| `set gap N` | composer | pixels around every window |
+| `set focus_follows_mouse 0\|1` | composer | focus the window under the pointer |
+| `set focus_new_window 0\|1` | composer | new windows take focus |
 
-Each layout has an on/off switch and disabled ones are not compiled in. At
-least one must stay on.
+Layouts: `tile` (master column left, stack right), `bstack` (master row on top,
+stack row below), `spiral` (each window takes a share of what is left), `grid`
+(equal cells), `mono` (one window at a time, full size).
 
-| Setting | Layout |
-| --- | --- |
-| `LAYOUT_TILE` | master column on the left, stack on the right |
-| `LAYOUT_BSTACK` | master row on top, stack row below |
-| `LAYOUT_SPIRAL` | each window takes a share of what is left |
-| `LAYOUT_GRID` | equal cells |
-| `LAYOUT_MONO` | one window at a time, full size |
+The router keeps the settings it forwards and replays them whenever the
+composer asks for a `dump`, so restarting the composer alone loses nothing.
 
-Also: `DEFAULT_LAYOUT` (by name), `MASTER_RATIO`, `NMASTER`, `GAP`. The command
-line overrides them: `xwincomposer -l spiral -r 60 -n 1 -g 6`.
-
-`layout next` cycles through the enabled layouts in the order above, and
-`layout NAME` for a layout that is not compiled in is ignored.
-
-### Focus
-
-| Setting | Effect |
-| --- | --- |
-| `FOCUS_FOLLOWS_MOUSE` | focus the window under the pointer |
-| `FOCUS_NEW_WINDOW` | new windows take focus |
-
-There is no click-to-focus. With `FOCUS_FOLLOWS_MOUSE 0`, move focus with the
+There is no click-to-focus. With `focus_follows_mouse 0`, move focus with the
 `focus next` / `focus prev` keys.
 
-### Looks
+### `keys[]`
 
-`BORDER`, `COL_FOCUS`, `COL_NORMAL` (used by `xwinrouter`).
-
-### Keys
-
-The `keys[]` table, `MOD` and `SHIFT` (used by `xwinkeys`). A binding is a
-modifier mask, an unshifted `XK_*` keysym and a command line, so
+A binding is a modifier mask, an unshifted `XK_*` keysym and a command line, so
 `{ MOD, XK_w, "spawn firefox" }` is valid. Use `SHIFT` in the modifier for
-shifted keys. Keys for disabled features are wrapped in `#if` so they
-disappear with the feature.
+shifted keys. Keys for features you switched off are harmless: the command is
+sent and ignored.
 
 ## Default keys
 
@@ -177,6 +181,38 @@ disappear with the feature.
 | MOD+1..9 | `view N` |
 | MOD+Shift+1..9 | `tag @ N` |
 
+## xwinbar
+
+```
+xwinbar [-b] [-a l|c|r] [-f font] [-B RRGGBB] [-F RRGGBB] [-p pad] COMMAND
+```
+
+Runs `COMMAND` with `sh -c` and shows the last line it prints, so the command
+is normally a script that prints a line, sleeps, and repeats. The bar knows
+nothing about dates or batteries; the example `xwinbar.sh` shows date, time and
+battery:
+
+```
+Mon 23 Nov  06:46  BAT 73%-
+```
+
+(`+` charging, `-` discharging, `=` full; nothing is shown without a battery.)
+
+| Option | Meaning |
+| --- | --- |
+| `-b` | bar at the bottom (default: top) |
+| `-a l\|c\|r` | text alignment (default `r`) |
+| `-f font` | core X font name (default `fixed`; list them with `xlsfonts`) |
+| `-B` / `-F` | background / text color, hex (default `000000` / `ffffff`) |
+| `-p pad` | vertical padding in pixels (default 3) |
+
+The bar is a dock window with `_NET_WM_STRUT_PARTIAL`, so the router shrinks
+the work area and the composer lays windows out below (or above) it. Core X
+fonts are Latin-1 only. If the script exits, the last line stays on screen.
+
+Write your own script: anything that prints lines works, for example
+`xwinbar 'while :; do uptime; sleep 10; done'`.
+
 ## Commands (the FIFO, read by xwinrouter)
 
 `ID` is hex such as `0x400003`, or `@` for the focused window.
@@ -192,12 +228,13 @@ disappear with the feature.
 | `fullscreen ID [0\|1]` | set or toggle fullscreen |
 | `raise ID` | raise window |
 | `spawn COMMAND...` | run through `sh -c` |
+| `set KEY VALUE...` | change a setting (table above) |
 | `dump` | re-send the full state as events |
 | `quit` | exit |
 | anything else | forwarded as a `bind LINE` event |
 
-Keep each line under 512 bytes. Lines up to 4096 bytes are written atomically,
-so several writers can share the FIFO safely.
+Keep each line under 512 bytes (1000 for `spawn`). Lines up to 4096 bytes are
+written atomically, so several writers can share the FIFO safely.
 
 ## Events (xwinrouter stdout)
 
@@ -210,8 +247,8 @@ activate ID             desktop N           bind LINE
 
 `workarea` is the screen minus dock struts (bars). `enter` is the pointer
 entering a window. `activate` and `desktop` are EWMH requests from other
-programs. A `dump` replies with `workarea`, `view`, one `map` per window, and
-a final `focus`.
+programs. A `dump` replies with the remembered `bind set ...` lines, then
+`workarea`, `view`, one `map` per window, and a final `focus`.
 
 ## xwincomposer
 
@@ -219,8 +256,9 @@ a final `focus`.
 xwincomposer [-l layout] [-r master%] [-n nmaster] [-g gap]
 ```
 
-Handles these `bind` lines at runtime: `layout NAME|next`, `ratio +N|-N`,
-`master +N|-N`, `gap +N|-N`, `zoom`.
+The options only set defaults before `xwinkeys`' settings arrive. It handles
+these `bind` lines at runtime: `set ...` (table above), `layout NAME|next`,
+`ratio +N|-N`, `master +N|-N`, `gap +N|-N`, `zoom`.
 
 Floating and fullscreen windows are not tiled. On startup it sends `dump`, so
 you can restart it alone without losing windows.
@@ -250,16 +288,20 @@ program that writes command lines into the FIFO can replace it.
 
 ## Limits
 
-- Key bindings are compiled in; there is no runtime key file.
+- Key bindings and settings are compiled into `xwinkeys`; there is no runtime
+  config file.
 - Only one X client can grab a given key combination.
 - No click-to-focus, no window rules, no multi-monitor awareness (the screen
   is one rectangle), no mouse bindings.
 - With focus following the mouse, a new window can lose focus to whichever
   window ends up under the pointer after the relayout.
-- If the router restarts, restart `xwincomposer` as well (the pipeline in
-  `xinitrc.example` does both). `xwinkeys` exits when nobody reads the FIFO any
-  more, so restart it too.
+- If the router restarts, restart `xwincomposer` and `xwinkeys` as well
+  (`xinitrc.example` starts all three together; `xwinkeys` resends the
+  settings on startup). `xwinkeys` exits on the next key press once nobody
+  reads the FIFO any more.
 - The router writes events to a pipe; if the composer hangs and stops reading
   for long enough, the router will block on output.
-- Tested under Xvfb with test windows, including injected key presses. Real
-  applications and dock struts have not been tested.
+- `xwinbar` has no tag or window list, no clickable parts, and no UTF-8.
+- Tested under Xvfb with test windows, injected key presses, and the bar
+  (dock struts, top and bottom, started before and after the router). Real
+  applications have not been tested.

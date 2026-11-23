@@ -15,6 +15,7 @@
  *   fullscreen ID [0|1]
  *   raise ID
  *   spawn COMMAND...       run through sh -c
+ *   set KEY VALUE...       change a setting (see below)
  *   dump                   re-send the whole state as events
  *   quit
  *   anything else          forwarded to stdout as "bind LINE"
@@ -23,6 +24,12 @@
  *   map ID TAG FLOAT | unmap ID | focus ID|none | tag ID N | view N
  *   float ID 0|1 | fullscreen ID 0|1 | workarea X Y W H
  *   enter ID | activate ID | desktop N | bind LINE
+ *
+ * Settings (xwinkeys sends them at startup; see config.h there):
+ *   set border N | color_focus RRGGBB | color_normal RRGGBB
+ *   set floating 0|1 | fullscreen 0|1 | tags 1..9
+ *   set <anything else>    kept, forwarded as "bind set ..." and replayed
+ *                          to the composer on "dump"
  */
 #define _POSIX_C_SOURCE 200112L
 #include <errno.h>
@@ -36,8 +43,17 @@
 #include <unistd.h>
 #include <xcb/xcb.h>
 
-#define XWR_ROUTER
-#include "config.h"
+#define MAXFSET 16
+
+/* Runtime settings. These are only defaults: xwinkeys sends the real ones
+ * with "set" at startup. */
+static int border_w = 2;
+static unsigned long col_focus = 0x5e81ac, col_normal = 0x3b4252;
+static int en_floating = 1, en_fullscreen = 1, ntags = 9;
+
+/* "set" lines meant for xwincomposer, remembered so "dump" can replay them */
+static char fset[MAXFSET][128];
+static int nfset;
 
 struct client {
 	xcb_window_t win;
@@ -193,7 +209,7 @@ static void ewmh_clients(void)
 
 static void apply(struct client *c)
 {
-	int bw = c->fullscreen ? 0 : BORDER;
+	int bw = c->fullscreen ? 0 : border_w;
 	int x = visible(c) ? c->x : -2 * (int)scr->width_in_pixels;
 	int w = c->w - 2 * bw, h = c->h - 2 * bw;
 	uint32_t v[5];
@@ -225,10 +241,10 @@ static void set_focus(struct client *c)
 	uint32_t w;
 
 	if (focused && focused != c)
-		border(focused, COL_NORMAL);
+		border(focused, col_normal);
 	focused = c;
 	if (c) {
-		border(c, COL_FOCUS);
+		border(c, col_focus);
 		xcb_set_input_focus(conn, XCB_INPUT_FOCUS_POINTER_ROOT, c->win, XCB_CURRENT_TIME);
 		if (has_atom(c->win, atom[A_PROTOCOLS], atom[A_TAKEFOCUS]))
 			send_proto(c->win, atom[A_TAKEFOCUS]);
@@ -265,7 +281,7 @@ static void set_fullscreen(struct client *c, int v)
 {
 	uint32_t fs = atom[A_FULLSCREEN];
 
-	if (!ENABLE_FULLSCREEN)
+	if (!en_fullscreen)
 		return;
 	if (v < 0)
 		v = !c->fullscreen;
@@ -295,7 +311,7 @@ static void set_view(int n)
 	struct client *c;
 	uint32_t v;
 
-	if (n < 1 || n > NTAGS)
+	if (n < 1 || n > ntags)
 		return;
 	view = n;
 	for (c = clients; c; c = c->next)
@@ -363,14 +379,14 @@ static void manage(xcb_window_t w)
 	}
 
 	c->tag = view;
-	c->floating = ENABLE_FLOATING &&
+	c->floating = en_floating &&
 	    (prop32(w, XCB_ATOM_WM_TRANSIENT_FOR, XCB_ATOM_WINDOW, &tr, 1) == 1
 	    || has_atom(w, atom[A_TYPE], atom[A_TYPE_DIALOG])
 	    || has_atom(w, atom[A_TYPE], atom[A_TYPE_SPLASH])
 	    || has_atom(w, atom[A_TYPE], atom[A_TYPE_UTILITY]));
 	if (c->floating) {
-		c->w = g->width + 2 * BORDER;
-		c->h = g->height + 2 * BORDER;
+		c->w = g->width + 2 * border_w;
+		c->h = g->height + 2 * border_w;
 		c->x = g->x;
 		c->y = g->y;
 		if ((c->x <= 0 && c->y <= 0) || c->x + c->w <= 0) {    /* centre */
@@ -387,7 +403,7 @@ static void manage(xcb_window_t w)
 
 	mask = XCB_EVENT_MASK_ENTER_WINDOW;
 	xcb_change_window_attributes(conn, w, XCB_CW_EVENT_MASK, &mask);
-	border(c, COL_NORMAL);
+	border(c, col_normal);
 	apply(c);
 	xcb_map_window(conn, w);
 	ewmh_clients();
@@ -455,7 +471,10 @@ static void kill_win(struct client *c)
 static void dump(void)
 {
 	struct client *c;
+	int i;
 
+	for (i = 0; i < nfset; i++)
+		emit("bind %s", fset[i]);
 	emit("workarea %d %d %d %d", wax, way, waw, wah);
 	emit("view %d", view);
 	for (c = clients; c; c = c->next) {
@@ -469,6 +488,93 @@ static void dump(void)
 		emit("focus 0x%lx", (unsigned long)focused->win);
 	else
 		emit("focus none");
+}
+
+static void recolor(void)
+{
+	struct client *c;
+
+	for (c = clients; c; c = c->next)
+		if (!c->dock)
+			border(c, c == focused ? col_focus : col_normal);
+}
+
+static void set_ntags(int n)
+{
+	struct client *c;
+	uint32_t v = n;
+
+	if (n < 1 || n > 9)
+		return;
+	ntags = n;
+	for (c = clients; c; c = c->next)
+		if (!c->dock && c->tag > n) {
+			c->tag = n;
+			apply(c);
+			emit("tag 0x%lx %d", (unsigned long)c->win, n);
+		}
+	xcb_change_property(conn, XCB_PROP_MODE_REPLACE, scr->root,
+	    atom[A_NDESK], XCB_ATOM_CARDINAL, 32, 1, &v);
+	if (view > n)
+		set_view(n);
+}
+
+/* keep the latest "set KEY ..." line per KEY */
+static void remember(const char *line, const char *key)
+{
+	int i, kl = (int)strlen(key);
+	size_t n;
+
+	for (i = 0; i < nfset; i++)
+		if (!strncmp(fset[i] + 4, key, kl) && fset[i][4 + kl] == ' ')
+			break;
+	if (i == nfset) {
+		if (nfset == MAXFSET)
+			return;
+		nfset++;
+	}
+	n = strlen(line);
+	if (n > sizeof fset[i] - 1)
+		n = sizeof fset[i] - 1;
+	memcpy(fset[i], line, n);
+	fset[i][n] = 0;
+}
+
+/* set KEY VALUE...: router settings apply here, the rest goes to the composer */
+static void setting(char **v, int n)
+{
+	struct client *c;
+	char b[128];
+	int i, a = atoi(v[2]);
+
+	if (!strcmp(v[1], "border")) {
+		if (a >= 0 && a <= 50) {
+			border_w = a;
+			for (c = clients; c; c = c->next)
+				if (!c->dock)
+					apply(c);
+		}
+	} else if (!strcmp(v[1], "color_focus")) {
+		col_focus = strtoul(v[2], NULL, 16);
+		recolor();
+	} else if (!strcmp(v[1], "color_normal")) {
+		col_normal = strtoul(v[2], NULL, 16);
+		recolor();
+	} else if (!strcmp(v[1], "floating")) {
+		en_floating = !!a;
+	} else if (!strcmp(v[1], "fullscreen")) {
+		en_fullscreen = !!a;
+	} else if (!strcmp(v[1], "tags")) {
+		set_ntags(a);
+	} else {
+		strcpy(b, "set");
+		for (i = 1; i < n; i++) {
+			strncat(b, " ", sizeof b - strlen(b) - 1);
+			strncat(b, v[i], sizeof b - strlen(b) - 1);
+		}
+		remember(b, v[1]);
+		emit("bind %s", b);
+	}
 }
 
 static void run(const char *line)
@@ -515,7 +621,7 @@ static void run(const char *line)
 	} else if (!strcmp(v[0], "tag") && n >= 3) {
 		c = lookup(v[1]);
 		t = atoi(v[2]);
-		if (c && !c->dock && t >= 1 && t <= NTAGS) {
+		if (c && !c->dock && t >= 1 && t <= ntags) {
 			c->tag = t;
 			apply(c);
 			emit("tag 0x%lx %d", (unsigned long)c->win, t);
@@ -526,7 +632,7 @@ static void run(const char *line)
 		set_view(atoi(v[1]));
 	} else if (!strcmp(v[0], "float")) {
 		c = lookup(n >= 2 ? v[1] : NULL);
-		if (ENABLE_FLOATING && c && !c->dock) {
+		if (en_floating && c && !c->dock) {
 			c->floating = n >= 3 ? !!atoi(v[2]) : !c->floating;
 			if (c->floating)
 				raise_win(c);
@@ -540,6 +646,8 @@ static void run(const char *line)
 		c = lookup(v[1]);
 		if (c && !c->dock)
 			raise_win(c);
+	} else if (!strcmp(v[0], "set") && n >= 3) {
+		setting(v, n);
 	} else if (!strcmp(v[0], "dump")) {
 		dump();
 	} else if (!strcmp(v[0], "quit")) {
@@ -555,7 +663,7 @@ static void run(const char *line)
 static void synth_configure(struct client *c)
 {
 	xcb_configure_notify_event_t ev;
-	int bw = c->fullscreen ? 0 : BORDER;
+	int bw = c->fullscreen ? 0 : border_w;
 
 	memset(&ev, 0, sizeof ev);
 	ev.response_type = XCB_CONFIGURE_NOTIFY;
@@ -579,8 +687,8 @@ static void configure_request(xcb_configure_request_event_t *e)
 	} else if (c && !c->dock) {                    /* floating: honour it */
 		if (e->value_mask & XCB_CONFIG_WINDOW_X)      c->x = e->x;
 		if (e->value_mask & XCB_CONFIG_WINDOW_Y)      c->y = e->y;
-		if (e->value_mask & XCB_CONFIG_WINDOW_WIDTH)  c->w = e->width + 2 * BORDER;
-		if (e->value_mask & XCB_CONFIG_WINDOW_HEIGHT) c->h = e->height + 2 * BORDER;
+		if (e->value_mask & XCB_CONFIG_WINDOW_WIDTH)  c->w = e->width + 2 * border_w;
+		if (e->value_mask & XCB_CONFIG_WINDOW_HEIGHT) c->h = e->height + 2 * border_w;
 		apply(c);
 	} else {                                       /* not ours: pass through */
 		if (e->value_mask & XCB_CONFIG_WINDOW_X)            v[i++] = e->x;
@@ -718,15 +826,13 @@ static int setup(void)
 	sup[n++] = atom[A_CURDESK];
 	sup[n++] = atom[A_WMNAME];
 	sup[n++] = atom[A_STRUTP];
-	if (ENABLE_FULLSCREEN) {
-		sup[n++] = atom[A_STATE];
-		sup[n++] = atom[A_FULLSCREEN];
-	}
+	sup[n++] = atom[A_STATE];
+	sup[n++] = atom[A_FULLSCREEN];
 	sup[n++] = atom[A_CLOSE];
 	sup[n++] = atom[A_TYPE];
 	xcb_change_property(conn, XCB_PROP_MODE_REPLACE, scr->root, atom[A_SUPPORTED],
 	    XCB_ATOM_ATOM, 32, n, sup);
-	v = NTAGS;
+	v = ntags;
 	xcb_change_property(conn, XCB_PROP_MODE_REPLACE, scr->root, atom[A_NDESK],
 	    XCB_ATOM_CARDINAL, 32, 1, &v);
 	v = 0;
