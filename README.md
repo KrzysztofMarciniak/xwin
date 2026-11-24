@@ -9,14 +9,14 @@ Small programs, plain text, one job each. Written in C89, linked only against `l
 | `xwinrouter` | Window manager mechanism. The only program with the WM role. Manages windows, applies the geometry it is told to apply, reports what happens. No layout, no keys, no focus policy. |
 | `xwincomposer` | Layout and focus policy. Reads router events, writes router commands. |
 | `xwinkeys` | Key bindings and **the only configuration**. Sends its settings at startup, then turns key presses into commands. |
-| `xwinbar` | Status bar. Shows the last line printed by an `sh` script. |
+| `xwinbar` | Status bar. Reads lines from a FIFO: status lines and `!notifications`. |
 
 Everything they say to each other is one line of plain text.
 
 1. `xwinkeys` grabs the shortcut keys listed in `config.h`. Only those: all other typing goes straight to the focused window. At startup it writes its settings to the FIFO, then one command line (for example `focus next`) for every shortcut you press.
 2. `xwinrouter` reads the FIFO. Commands it knows (`focus`, `close`, `tag`, `view`, `spawn`, `geom`, ...) it executes itself. Anything else it prints on its stdout as a `bind` event. It also prints an event for everything that happens on screen: window opened, window closed, focus changed, usable area changed.
 3. `xwincomposer` reads those events from the router's stdout, decides where every window goes, and writes `geom`, `focus` and `raise` commands to the FIFO. The router reads them there and applies them.
-4. `xwinbar` is independent. It runs a shell script, shows the last line the script prints, and tells the router to keep that strip of the screen free.
+4. `xwinbar` is independent. It reads lines from its own FIFO (and optionally runs a script that prints lines), shows the last status line, shows `!` lines as timed notifications, and tells the router to keep that strip of the screen free.
 
 The loop is closed by the last line of `xinitrc.example`: the router's stdout is piped into the composer, and the composer's stdout goes back into the FIFO that the router reads.
 
@@ -57,6 +57,7 @@ cc -std=c89 -pedantic -Wall -Wextra $(pkg-config --cflags xcb) \
 install -m 755 xwinrouter xwincomposer xwinkeys xwinbar /usr/local/bin/
 install -d /usr/local/share/xwinrouter
 install -m 755 xwinbar.sh /usr/local/share/xwinrouter/
+install -m 755 xwinnotify.sh /usr/local/bin/xwinnotify
 
 cp xinitrc.example ~/.xinitrc
 ```
@@ -74,7 +75,13 @@ rm -f "$fifo"
 mkfifo -m 600 "$fifo"
 
 xsetroot -cursor_name left_ptr &
-xwinbar /usr/local/share/xwinrouter/xwinbar.sh &
+
+# the bar's own FIFO: plain line = status, "!text" = notification
+bfifo=${XDG_RUNTIME_DIR:-/tmp}/xwinbar.fifo
+rm -f "$bfifo"
+mkfifo -m 600 "$bfifo"
+xwinbar &
+/usr/local/share/xwinrouter/xwinbar.sh > "$bfifo" &
 
 # sends settings and key bindings from config.h
 xwinkeys > "$fifo" &
@@ -93,7 +100,8 @@ Xephyr :1 -screen 1280x800 &
 export DISPLAY=:1
 xwinkeys > fifo &
 xwinrouter < fifo | xwincomposer > fifo &
-xwinbar ./xwinbar.sh &
+xwinbar &
+sleep 1; ./xwinbar.sh > "${XDG_RUNTIME_DIR:-/tmp}/xwinbar.fifo" &
 xterm &
 ```
 
@@ -181,10 +189,18 @@ Desktops are 1-9 (the router supports `1..9`, there is no desktop 0).
 ## xwinbar
 
 ```
-xwinbar [-b] [-a l|c|r] [-f font] [-B RRGGBB] [-F RRGGBB] [-p pad] COMMAND
+xwinbar [-b] [-a l|c|r] [-f font] [-B RRGGBB] [-F RRGGBB] [-p pad] [-i fifo] [-t secs] [COMMAND]
 ```
 
-Runs `COMMAND` with `sh -c` and shows the last line it prints. The command is normally a script that prints a line, sleeps, and repeats. The example `xwinbar.sh` shows date, time and battery:
+The bar reads lines from a FIFO (default `$XDG_RUNTIME_DIR/xwinbar.fifo`, else `/tmp/xwinbar.fifo`). It creates the FIFO if missing and removes it on exit. Anything can write to it:
+
+| Line | Effect |
+| --- | --- |
+| `text` | status line, stays until replaced |
+| `!text` | notification, shown for `-t` seconds, then the status returns |
+| `!` | clears the notification now |
+
+`xwinnotify "build finished"` is a one-line wrapper that writes `!build finished`. An optional `COMMAND` is run with `sh -c` and its output follows the same rules, so a script that prints a line, sleeps, and repeats still works as a status source. The example `xwinbar.sh` shows date, time and battery:
 
 ```
 Mon 23 Nov  06:46  BAT 73%-
@@ -199,14 +215,74 @@ Mon 23 Nov  06:46  BAT 73%-
 | `-f font` | core X font (default `fixed`; list with `xlsfonts`) |
 | `-B` / `-F` | background / text color, hex (default `000000` / `ffffff`) |
 | `-p pad` | vertical padding in pixels (default 3) |
+| `-i fifo` | FIFO path (`xwinnotify` follows `$XWINBAR_FIFO`) |
+| `-t secs` | notification time (default 5) |
 
-The bar is a dock window with `_NET_WM_STRUT_PARTIAL`. The router shrinks the work area and the composer lays windows out around it. Core X fonts are Latin-1 only. If the script exits, the last line stays on screen.
+The bar is a dock window with `_NET_WM_STRUT_PARTIAL`. The router shrinks the work area and the composer lays windows out around it. Core X fonts are Latin-1 only. If the script exits, the last line stays on screen. The FIFO is opened read-write so writers closing it never end the bar's input.
 
-Your own script is any command that prints lines: `xwinbar 'while :; do uptime; sleep 10; done'`.
+Your own source is anything that writes lines: `xwinbar 'while :; do uptime; sleep 10; done'`, or `echo '!disk full' > $XDG_RUNTIME_DIR/xwinbar.fifo`.
+
+### xwinnotify
+
+```
+xwinnotify [MESSAGE...]
+```
+
+Shows MESSAGE in the bar for `-t` seconds (default 5), then the status line comes back. It joins its arguments with spaces and writes `!MESSAGE` to the bar's FIFO. With no arguments it writes `!`, which clears the current notification at once.
+
+```
+xwinnotify "build finished"
+xwinnotify disk is 95% full
+xwinnotify                     # clear
+```
+
+- A new notification replaces the one showing. There is no queue.
+- It only sends notifications. To change the status line, write a plain line to the FIFO (see below).
+- It uses `$XWINBAR_FIFO` if set, else the same default path as the bar. If you started the bar with `-i path`, `export XWINBAR_FIFO=path`.
+- It exits with an error if the FIFO does not exist, which usually means the bar is not running.
+- It opens the FIFO read-write, so it never hangs waiting for a reader.
+
+Use it from anything: `make && xwinnotify done || xwinnotify build FAILED`, a cron job, a key binding (`spawn xwinnotify hello` in `config.h`).
+
+## Sending lines by hand
+
+There are two FIFOs. Both take one command per line, and both can be written with plain `echo`.
+
+| FIFO | Path | Read by | Gets |
+| --- | --- | --- | --- |
+| router | `${XDG_RUNTIME_DIR:-/tmp}/xwr.fifo` (made by `~/.xinitrc`) | `xwinrouter` | window manager commands, see [Commands](#commands) |
+| bar | `${XDG_RUNTIME_DIR:-/tmp}/xwinbar.fifo` (made by `xwinbar`, or by `~/.xinitrc`) | `xwinbar` | status lines and notifications |
+
+```sh
+rt=${XDG_RUNTIME_DIR:-/tmp}
+
+# router: any command from the Commands table
+echo "view 2"        > $rt/xwr.fifo
+echo "layout mono"   > $rt/xwr.fifo      # unknown to the router, forwarded to the composer
+echo "set gap 6"     > $rt/xwr.fifo
+echo "spawn xterm"   > $rt/xwr.fifo
+echo "close"         > $rt/xwr.fifo      # focused window
+
+# bar: status line, notification, clear
+echo "my status"     > $rt/xwinbar.fifo  # stays until replaced
+echo "!look at me"   > $rt/xwinbar.fifo  # shown for -t seconds
+echo "!"             > $rt/xwinbar.fifo  # clear the notification
+```
+
+Several lines in one write work too: `printf 'a\nb\n!c\n' > $rt/xwinbar.fifo`.
+
+Notes:
+
+- Lines are plain text, one per line, ended by a newline. Several programs can write at once; a line written in one `write` of up to 4096 bytes is not mixed with another writer's.
+- Bar limits: text is cut at 255 characters, control characters become spaces, a line over 1023 bytes is dropped. Core X fonts are Latin-1 only, so other characters will look wrong.
+- Router limits: see the note under [Commands](#commands).
+- If the program that reads a FIFO is not running, a plain `echo > fifo` can wait forever for a reader. Check that the bar or router is up first. To make a write to the bar's FIFO never wait, open it read-write: `echo "!hi" 1<> $rt/xwinbar.fifo` (this is what `xwinnotify` does). The bar removes its FIFO when it exits normally, so a missing FIFO means the bar is not running; after a crash a stale one can be left behind.
+- Do not run two bars on the same FIFO path; give the second one its own `-i`.
+- To watch what the router sends back (events), run it from a terminal: `xwinrouter < fifo | tee /dev/stderr | xwincomposer > fifo`, or write `dump` to the router FIFO and read its stdout.
 
 ## Commands
 
-Written to the FIFO, read by `xwinrouter`. `ID` is hex such as `0x400003`, or `@` for the focused window.
+Written to the router FIFO, read by `xwinrouter`. `ID` is hex such as `0x400003`, or `@` for the focused window.
 
 | Command | Effect |
 | --- | --- |

@@ -5,7 +5,13 @@ rm -f "$fifo"
 mkfifo -m 600 "$fifo"
 
 xsetroot -cursor_name left_ptr &
-xwinbar /usr/local/share/xwinrouter/xwinbar.sh &
+# the bar reads lines from its own FIFO: plain line = status,
+# "!text" = notification (try: xwinnotify hello)
+bfifo=${XDG_RUNTIME_DIR:-/tmp}/xwinbar.fifo
+rm -f "$bfifo"
+mkfifo -m 600 "$bfifo"
+xwinbar &
+/usr/local/share/xwinrouter/xwinbar.sh > "$bfifo" &
 
 # sends the settings and key bindings from config.h to the router
 xwinkeys > "$fifo" &

@@ -23,6 +23,7 @@ install: all
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/share/xwinrouter
 	install -m 755 xwinrouter xwincomposer xwinkeys xwinbar $(DESTDIR)$(PREFIX)/bin
 	install -m 755 xwinbar.sh $(DESTDIR)$(PREFIX)/share/xwinrouter
+	install -m 755 xwinnotify.sh $(DESTDIR)$(PREFIX)/bin/xwinnotify
 
 clean:
 	rm -f xwinrouter xwincomposer xwinkeys xwinbar
