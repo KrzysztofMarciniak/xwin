@@ -14,22 +14,42 @@
  *   xwinbar.sh > "$bfifo" &
  *   xwinnotify "build finished"
  *
+ * Defaults for all of these, plus gaps and height, are in the config block below.
+ *
  * usage: xwinbar [-b] [-a l|c|r] [-f font] [-B RRGGBB] [-F RRGGBB] [-p pad]
  *                [-i fifo] [-t secs] [FIFO]
- *   -b  put the bar at the bottom (default: top)
- *   -a  text alignment: l, c or r (default r)
- *   -f  core X font name (default "fixed"; list them with xlsfonts)
- *   -B  background color, -F text color (hex, default 000000 / ffffff)
- *   -p  vertical padding in pixels (default 3)
+ *   -b  put the bar at the bottom
+ *   -a  text alignment: l, c or r
+ *   -f  core X font name (list them with xlsfonts)
+ *   -B  background color, -F text color (hex)
+ *   -p  vertical padding in pixels
  *   -i  FIFO path, same as the FIFO argument (which wins if both are given).
  *       Default $XDG_RUNTIME_DIR/xwinbar.fifo, else /tmp/...
  *       Created if missing, removed on exit if xwinbar created it.
- *   -t  seconds a notification stays (default 5)
+ *   -t  seconds a notification stays
  *
  * The bar is a dock window with _NET_WM_STRUT_PARTIAL, so xwinrouter keeps
  * tiled windows out of its way. Core X fonts are Latin-1 only. The FIFO is
  * opened read-write so it never sees EOF when a writer closes (Linux/BSD).
  */
+
+/* ---------------------------------------------------------------- config --
+ * Edit and recompile. Command-line options override these.
+ */
+#define BOTTOM      0           /* 1: bar at the bottom of the screen */
+#define ALIGN       'r'         /* text: 'l' left, 'c' centre, 'r' right */
+#define FONT        "fixed"     /* core X font (xlsfonts); a smaller font = a smaller bar */
+#define BG          0x000000    /* background RRGGBB */
+#define FG          0xffffff    /* text RRGGBB */
+#define NOTE_SECS   5           /* seconds a notification stays */
+
+#define PAD         3           /* space above and below the text, pixels */
+#define HEIGHT      0           /* bar height in pixels; 0: font height + 2 * PAD */
+#define SIDE        8           /* space between the text and the bar's left/right end */
+#define MARGIN_X    12           /* gap between the bar and the left AND right screen edge */
+#define MARGIN_Y    12           /* gap between the bar and the top (or bottom) screen edge */
+#define WIN_GAP     6           /* extra space between the bar and the windows below (or above) it */
+
 #define _POSIX_C_SOURCE 200112L
 #include <errno.h>
 #include <fcntl.h>
@@ -44,7 +64,6 @@
 #include <unistd.h>
 #include <xcb/xcb.h>
 
-#define SIDE 8                    /* horizontal padding, pixels */
 
 struct src {
 	int fd;
@@ -57,7 +76,8 @@ static xcb_screen_t *scr;
 static xcb_window_t win;
 static xcb_gcontext_t gc;
 static xcb_font_t font;
-static int ascent, align = 'r', ffd = -1, secs = 5;
+static int bar_h;
+static int ascent, descent, bar_w, align = ALIGN, ffd = -1, secs = NOTE_SECS;
 static char status[256], note[256], text[256];
 static time_t note_until;         /* 0: no notification showing */
 static volatile sig_atomic_t quit;
@@ -94,10 +114,11 @@ static void draw(void)
 		if (align == 'l')
 			x = SIDE;
 		else if (align == 'c')
-			x = ((int)scr->width_in_pixels - w) / 2;
+			x = (bar_w - w) / 2;
 		else
-			x = (int)scr->width_in_pixels - w - SIDE;
-		xcb_image_text_8(conn, n, win, gc, x, ascent + 3, text);
+			x = bar_w - w - SIDE;
+		xcb_image_text_8(conn, n, win, gc, x,
+		    (bar_h - (ascent + descent)) / 2 + ascent, text);
 	}
 	xcb_flush(conn);
 }
@@ -171,10 +192,10 @@ static void onsig(int s)
 
 int main(int argc, char **argv)
 {
-	const char *fontname = "fixed", *fifo = NULL;
+	const char *fontname = FONT, *fifo = NULL;
 	char fifobuf[256];
-	unsigned long bg = 0x000000, fg = 0xffffff;
-	int bottom = 0, pad = 3, bad = 0, o, n, screen = 0, bar_h, y, timeout, made = 0;
+	unsigned long bg = BG, fg = FG;
+	int bottom = BOTTOM, pad = PAD, bad = 0, o, n, screen = 0, y, timeout, made = 0;
 	uint32_t wv[2], gv[3], st[12], st4[4], type;
 	xcb_query_font_reply_t *fr;
 	xcb_void_cookie_t ck;
@@ -272,15 +293,20 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	ascent = fr->font_ascent;
-	bar_h = fr->font_ascent + fr->font_descent + 2 * (pad < 0 ? 0 : pad);
+	descent = fr->font_descent;
+	bar_h = HEIGHT > 0 ? HEIGHT :
+	    fr->font_ascent + fr->font_descent + 2 * (pad < 0 ? 0 : pad);
+	bar_w = (int)scr->width_in_pixels - 2 * MARGIN_X;
+	if (bar_w < 1)
+		bar_w = 1;
 	free(fr);
 
-	y = bottom ? (int)scr->height_in_pixels - bar_h : 0;
+	y = bottom ? (int)scr->height_in_pixels - bar_h - MARGIN_Y : MARGIN_Y;
 	win = xcb_generate_id(conn);
 	wv[0] = bg;
 	wv[1] = XCB_EVENT_MASK_EXPOSURE;
-	xcb_create_window(conn, XCB_COPY_FROM_PARENT, win, scr->root, 0, y,
-	    scr->width_in_pixels, bar_h, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
+	xcb_create_window(conn, XCB_COPY_FROM_PARENT, win, scr->root, MARGIN_X, y,
+	    bar_w, bar_h, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
 	    scr->root_visual, XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK, wv);
 	gc = xcb_generate_id(conn);
 	gv[0] = fg;
@@ -299,13 +325,13 @@ int main(int argc, char **argv)
 	memset(st, 0, sizeof st);
 	memset(st4, 0, sizeof st4);
 	if (bottom) {
-		st[3] = st4[3] = bar_h;
-		st[10] = 0;
-		st[11] = scr->width_in_pixels - 1;
+		st[3] = st4[3] = bar_h + MARGIN_Y + WIN_GAP;
+		st[10] = MARGIN_X;
+		st[11] = scr->width_in_pixels - 1 - MARGIN_X;
 	} else {
-		st[2] = st4[2] = bar_h;
-		st[8] = 0;
-		st[9] = scr->width_in_pixels - 1;
+		st[2] = st4[2] = bar_h + MARGIN_Y + WIN_GAP;
+		st[8] = MARGIN_X;
+		st[9] = scr->width_in_pixels - 1 - MARGIN_X;
 	}
 	xcb_change_property(conn, XCB_PROP_MODE_REPLACE, win, intern("_NET_WM_STRUT_PARTIAL"),
 	    XCB_ATOM_CARDINAL, 32, 12, st);
