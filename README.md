@@ -12,7 +12,11 @@ Small programs, plain text, one job each. Written in C89, linked only against `l
 | `xwinbar` | Status bar. Reads lines from a FIFO: status lines and `!notifications`. |
 | `xwinmenu` | Program launcher, a dmenu alternative. Lists the executables in `$PATH` in the centre of the screen. |
 
+
 Everything they say to each other is one line of plain text.
+
+**Looking for a terminal?**
+I also created [xxt](https://github.com/KrzysztofMarciniak/xxt), a lightweight terminal emulator written in just 400 LOC, with patch support (vi mode, libvterm and many more).
 
 1. `xwinkeys` grabs the shortcut keys listed in `config.h`. Only those: all other typing goes straight to the focused window. At startup it writes its settings to the FIFO, then one command line (for example `focus next`) for every shortcut you press.
 2. `xwinrouter` reads the FIFO. Commands it knows (`focus`, `close`, `tag`, `view`, `spawn`, `geom`, ...) it executes itself. Anything else it prints on its stdout as a `bind` event. It also prints an event for everything that happens on screen: window opened, window closed, focus changed, usable area changed.
