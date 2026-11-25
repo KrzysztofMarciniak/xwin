@@ -10,7 +10,7 @@ xsetroot -cursor_name left_ptr &
 bfifo=${XDG_RUNTIME_DIR:-/tmp}/xwinbar.fifo
 rm -f "$bfifo"
 mkfifo -m 600 "$bfifo"
-xwinbar &
+xwinbar "$bfifo" &
 /usr/local/share/xwinrouter/xwinbar.sh > "$bfifo" &
 
 # sends the settings and key bindings from config.h to the router

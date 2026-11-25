@@ -8,21 +8,21 @@
  *   !text     notification: shown for -t seconds, then the status comes back
  *   !         clears the notification now
  *
- * An optional COMMAND is run with sh -c and its output goes through the same
- * rules, so a status script that loops "print one line, sleep" still works
- * (see xwinbar.sh). Without COMMAND, feed the FIFO yourself:
+ * The FIFO path is the optional argument. Feed it yourself:
  *
- *   xwinbar & ; xwinbar.sh > $XDG_RUNTIME_DIR/xwinbar.fifo &
+ *   xwinbar "$bfifo" &
+ *   xwinbar.sh > "$bfifo" &
  *   xwinnotify "build finished"
  *
  * usage: xwinbar [-b] [-a l|c|r] [-f font] [-B RRGGBB] [-F RRGGBB] [-p pad]
- *                [-i fifo] [-t secs] [COMMAND]
+ *                [-i fifo] [-t secs] [FIFO]
  *   -b  put the bar at the bottom (default: top)
  *   -a  text alignment: l, c or r (default r)
  *   -f  core X font name (default "fixed"; list them with xlsfonts)
  *   -B  background color, -F text color (hex, default 000000 / ffffff)
  *   -p  vertical padding in pixels (default 3)
- *   -i  FIFO path (default $XDG_RUNTIME_DIR/xwinbar.fifo, else /tmp/...).
+ *   -i  FIFO path, same as the FIFO argument (which wins if both are given).
+ *       Default $XDG_RUNTIME_DIR/xwinbar.fifo, else /tmp/...
  *       Created if missing, removed on exit if xwinbar created it.
  *   -t  seconds a notification stays (default 5)
  *
@@ -137,14 +137,17 @@ static void line(const char *l)
 /* read what is there, handle every complete line; -1 if the source ended */
 static int pump(struct src *s)
 {
-	char *p, *nl;
+	char *p, *nl, tmp[512];
 	int n;
 
-	n = (int)read(s->fd, s->buf + s->len, sizeof s->buf - 1 - s->len);
+	n = (int)read(s->fd, tmp, sizeof tmp);
 	if (n < 0)
 		return (errno == EINTR || errno == EAGAIN) ? 0 : -1;
 	if (n == 0)
 		return -1;
+	if (s->len + n > (int)sizeof s->buf - 1)
+		s->len = 0;                     /* overlong line: drop it */
+	memcpy(s->buf + s->len, tmp, n);
 	s->len += n;
 	s->buf[s->len] = 0;
 	p = s->buf;
@@ -160,28 +163,6 @@ static int pump(struct src *s)
 	return 0;
 }
 
-static int start(const char *cmd, pid_t *pid)
-{
-	int fd[2];
-
-	if (pipe(fd) < 0)
-		return -1;
-	*pid = fork();
-	if (*pid < 0)
-		return -1;
-	if (*pid == 0) {
-		close(fd[0]);
-		dup2(fd[1], 1);
-		close(fd[1]);
-		close(xcb_get_file_descriptor(conn));
-		close(ffd);
-		execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
-		_exit(127);
-	}
-	close(fd[1]);
-	return fd[0];
-}
-
 static void onsig(int s)
 {
 	(void)s;
@@ -190,7 +171,7 @@ static void onsig(int s)
 
 int main(int argc, char **argv)
 {
-	const char *fontname = "fixed", *cmd = NULL, *fifo = NULL;
+	const char *fontname = "fixed", *fifo = NULL;
 	char fifobuf[256];
 	unsigned long bg = 0x000000, fg = 0xffffff;
 	int bottom = 0, pad = 3, bad = 0, o, n, screen = 0, bar_h, y, timeout, made = 0;
@@ -199,11 +180,10 @@ int main(int argc, char **argv)
 	xcb_void_cookie_t ck;
 	xcb_generic_error_t *err;
 	xcb_generic_event_t *ev;
-	struct pollfd pf[3];
+	struct pollfd pf[2];
 	struct sigaction sa;
-	struct src in, out;
+	struct src in;
 	struct stat sb;
-	pid_t pid = 0;
 	time_t now;
 
 	while ((o = getopt(argc, argv, "ba:f:B:F:p:i:t:")) != -1) {
@@ -223,11 +203,11 @@ int main(int argc, char **argv)
 	}
 	if (bad || optind + 1 < argc) {
 		fprintf(stderr, "usage: xwinbar [-b] [-a l|c|r] [-f font] [-B RRGGBB] "
-		    "[-F RRGGBB] [-p pad] [-i fifo] [-t secs] [COMMAND]\n");
+		    "[-F RRGGBB] [-p pad] [-i fifo] [-t secs] [FIFO]\n");
 		return 2;
 	}
 	if (optind < argc)
-		cmd = argv[optind];
+		fifo = argv[optind];
 	if (secs < 1)
 		secs = 1;
 	if (!fifo) {
@@ -335,18 +315,7 @@ int main(int argc, char **argv)
 	xcb_flush(conn);
 
 	memset(&in, 0, sizeof in);
-	memset(&out, 0, sizeof out);
 	in.fd = ffd;
-	out.fd = -1;
-	if (cmd) {
-		out.fd = start(cmd, &pid);
-		if (out.fd < 0) {
-			fprintf(stderr, "xwinbar: cannot run \"%s\"\n", cmd);
-			if (made)
-				unlink(fifo);
-			return 1;
-		}
-	}
 
 	while (!quit) {
 		while ((ev = xcb_poll_for_event(conn)) != NULL) {
@@ -374,23 +343,14 @@ int main(int argc, char **argv)
 		pf[1].fd = in.fd;
 		pf[1].events = POLLIN;
 		pf[1].revents = 0;
-		pf[2].fd = out.fd;             /* -1 after the script exits: skipped */
-		pf[2].events = POLLIN;
-		pf[2].revents = 0;
-		if (poll(pf, 3, timeout) < 0) {
+		if (poll(pf, 2, timeout) < 0) {
 			if (errno == EINTR)
 				continue;
 			break;
 		}
 		if (pf[1].revents & POLLIN)
 			pump(&in);
-		if (out.fd >= 0 && (pf[2].revents & (POLLIN | POLLHUP)) && pump(&out) < 0) {
-			close(out.fd);
-			out.fd = -1;               /* script ended; keep the last text */
-		}
 	}
-	if (pid > 0)
-		kill(pid, SIGTERM);
 	xcb_disconnect(conn);
 	close(ffd);
 	if (made)

@@ -80,7 +80,7 @@ xsetroot -cursor_name left_ptr &
 bfifo=${XDG_RUNTIME_DIR:-/tmp}/xwinbar.fifo
 rm -f "$bfifo"
 mkfifo -m 600 "$bfifo"
-xwinbar &
+xwinbar "$bfifo" &
 /usr/local/share/xwinrouter/xwinbar.sh > "$bfifo" &
 
 # sends settings and key bindings from config.h
@@ -189,7 +189,7 @@ Desktops are 1-9 (the router supports `1..9`, there is no desktop 0).
 ## xwinbar
 
 ```
-xwinbar [-b] [-a l|c|r] [-f font] [-B RRGGBB] [-F RRGGBB] [-p pad] [-i fifo] [-t secs] [COMMAND]
+xwinbar [-b] [-a l|c|r] [-f font] [-B RRGGBB] [-F RRGGBB] [-p pad] [-i fifo] [-t secs] [FIFO]
 ```
 
 The bar reads lines from a FIFO (default `$XDG_RUNTIME_DIR/xwinbar.fifo`, else `/tmp/xwinbar.fifo`). It creates the FIFO if missing and removes it on exit. Anything can write to it:
@@ -200,7 +200,7 @@ The bar reads lines from a FIFO (default `$XDG_RUNTIME_DIR/xwinbar.fifo`, else `
 | `!text` | notification, shown for `-t` seconds, then the status returns |
 | `!` | clears the notification now |
 
-`xwinnotify "build finished"` is a one-line wrapper that writes `!build finished`. An optional `COMMAND` is run with `sh -c` and its output follows the same rules, so a script that prints a line, sleeps, and repeats still works as a status source. The example `xwinbar.sh` shows date, time and battery:
+`xwinnotify "build finished"` is a one-line wrapper that writes `!build finished`. The optional `FIFO` argument is the path to read from (same as `-i`; it wins if both are given). Point a status script at it, like `xwinbar.sh > "$bfifo" &`. The example `xwinbar.sh` shows date, time and battery:
 
 ```
 Mon 23 Nov  06:46  BAT 73%-
@@ -215,12 +215,12 @@ Mon 23 Nov  06:46  BAT 73%-
 | `-f font` | core X font (default `fixed`; list with `xlsfonts`) |
 | `-B` / `-F` | background / text color, hex (default `000000` / `ffffff`) |
 | `-p pad` | vertical padding in pixels (default 3) |
-| `-i fifo` | FIFO path (`xwinnotify` follows `$XWINBAR_FIFO`) |
+| `-i fifo` | FIFO path, same as the `FIFO` argument (`xwinnotify` follows `$XWINBAR_FIFO`) |
 | `-t secs` | notification time (default 5) |
 
-The bar is a dock window with `_NET_WM_STRUT_PARTIAL`. The router shrinks the work area and the composer lays windows out around it. Core X fonts are Latin-1 only. If the script exits, the last line stays on screen. The FIFO is opened read-write so writers closing it never end the bar's input.
+The bar is a dock window with `_NET_WM_STRUT_PARTIAL`. The router shrinks the work area and the composer lays windows out around it. Core X fonts are Latin-1 only. The FIFO is opened read-write so writers closing it never end the bar's input.
 
-Your own source is anything that writes lines: `xwinbar 'while :; do uptime; sleep 10; done'`, or `echo '!disk full' > $XDG_RUNTIME_DIR/xwinbar.fifo`.
+Your own source is anything that writes lines: `while :; do uptime; sleep 10; done > "$bfifo" &`, or `echo '!disk full' > $XDG_RUNTIME_DIR/xwinbar.fifo`.
 
 ### xwinnotify
 

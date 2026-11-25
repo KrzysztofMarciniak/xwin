@@ -6,11 +6,14 @@
  *
  * usage: xwincomposer [-l layout] [-r master%] [-n nmaster] [-g gap]
  *
+ * Every desktop (tag) has its own master ratio and remembers its focused
+ * window. "set ratio N" sets all desktops, "ratio +N|-N" only the current one.
+ *
  * It has no config file. Defaults are below; xwinkeys sends the real
  * settings, which arrive here as "bind set ..." lines:
  *   set layouts NAME...      layouts that "layout next" cycles through
  *   set layout NAME          current layout
- *   set ratio N              master area in percent (10..90)
+ *   set ratio N              master area in percent (10..90), every desktop
  *   set master N             windows in the master area
  *   set gap N                pixels around every window
  *   set focus_follows_mouse 0|1
@@ -24,10 +27,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #define MAXW 256
 #define NLAYOUTS 5
+#define NTAGS 9
 
 enum { L_TILE, L_BSTACK, L_SPIRAL, L_GRID, L_MONO };
 
@@ -42,10 +47,14 @@ static struct win ws[MAXW];
 static int nw, view = 1, ready;
 static int enabled[NLAYOUTS] = { 1, 1, 1, 1, 1 };   /* which layouts may be used */
 static int mode = L_TILE;                            /* current layout */
-static int gap = 0, ratio = 55, nmaster = 1;
+static int gap = 0, nmaster = 1;
+static int vratio[NTAGS + 1] = { 0, 55, 55, 55, 55, 55, 55, 55, 55, 55 };   /* per desktop */
+static unsigned long vfocus[NTAGS + 1];     /* focused window per desktop, 0: none */
+#define ratio vratio[view]
 static int follow_mouse = 1, focus_new = 1;
 static int wx, wy, ww, wh;
 static unsigned long focus;
+static struct timeval switched;             /* when the desktop last changed */
 
 static int find(unsigned long id)
 {
@@ -55,6 +64,33 @@ static int find(unsigned long id)
 		if (ws[i].id == id)
 			return i;
 	return -1;
+}
+
+/* windows sliding under a still mouse after a desktop switch send "enter"
+ * events; they must not override the focus the desktop remembers */
+static int just_switched(void)
+{
+	struct timeval t;
+
+	gettimeofday(&t, NULL);
+	return (t.tv_sec - switched.tv_sec) * 1000 + (t.tv_usec - switched.tv_usec) / 1000 < 150;
+}
+
+static void set_all_ratio(int r)
+{
+	int i;
+
+	for (i = 1; i <= NTAGS; i++)
+		vratio[i] = r;
+}
+
+static void forget(unsigned long id)
+{
+	int i;
+
+	for (i = 1; i <= NTAGS; i++)
+		if (vfocus[i] == id)
+			vfocus[i] = 0;
 }
 
 static int layout_index(const char *name)
@@ -193,8 +229,12 @@ static void relayout(void)
 
 static void pick(void)
 {
-	int i;
+	int i = vfocus[view] ? find(vfocus[view]) : -1;
 
+	if (i >= 0 && ws[i].tag == view) {
+		printf("focus 0x%lx\n", ws[i].id);
+		return;
+	}
 	for (i = 0; i < nw; i++)
 		if (ws[i].tag == view) {
 			printf("focus 0x%lx\n", ws[i].id);
@@ -266,7 +306,7 @@ static int setting(char *l)
 	if (!strcmp(k, "layout"))
 		return use_layout(layout_index(v));
 	if (!strcmp(k, "ratio"))
-		ratio = clamp(atoi(v), 10, 90);
+		set_all_ratio(clamp(atoi(v), 10, 90));
 	else if (!strcmp(k, "master"))
 		nmaster = clamp(atoi(v), 0, 50);
 	else if (!strcmp(k, "gap"))
@@ -296,7 +336,7 @@ static void bind(char *l)
 			return;                       /* unknown or disabled */
 		}
 	} else if (sscanf(l, "ratio %d", &a) == 1) {
-		ratio = clamp(ratio + a, 10, 90);
+		ratio = clamp(ratio + a, 10, 90);          /* this desktop only */
 	} else if (sscanf(l, "master %d", &a) == 1) {
 		nmaster = clamp(nmaster + a, 0, 50);
 	} else if (sscanf(l, "gap %d", &a) == 1) {
@@ -333,6 +373,7 @@ static void handle(char *l)
 			memmove(ws + i, ws + i + 1, (nw - i - 1) * sizeof ws[0]);
 			nw--;
 		}
+		forget(id);
 		relayout();
 	} else if (!strncmp(l, "focus none", 10)) {
 		focus = 0;
@@ -341,17 +382,28 @@ static void handle(char *l)
 		pick();
 	} else if (sscanf(l, "focus %lx", &id) == 1) {
 		focus = id;
+		if ((i = find(id)) >= 0 && ws[i].tag >= 1 && ws[i].tag <= NTAGS)
+			vfocus[ws[i].tag] = id;
 		if (!ready) {
 			ready = 1;
 			relayout();
+		} else if (mode == L_MONO) {
+			relayout();                  /* bring the focused window up */
 		}
 	} else if (sscanf(l, "tag %lx %d", &id, &a) == 2) {
-		if ((i = find(id)) >= 0)
+		if ((i = find(id)) >= 0) {
+			forget(id);
 			ws[i].tag = a;
+		}
 		relayout();
 	} else if (sscanf(l, "view %d", &a) == 1) {
+		if (a < 1 || a > NTAGS)
+			return;
 		view = a;
+		gettimeofday(&switched, NULL);
 		relayout();
+		if (!focus)
+			pick();                  /* nothing focused: restore this desktop's window */
 	} else if (sscanf(l, "float %lx %d", &id, &a) == 2) {
 		if ((i = find(id)) >= 0)
 			ws[i].floating = a;
@@ -364,7 +416,7 @@ static void handle(char *l)
 		wx = a; wy = b; ww = c; wh = d;
 		relayout();
 	} else if (sscanf(l, "enter %lx", &id) == 1) {
-		if (follow_mouse && id != focus)
+		if (follow_mouse && id != focus && !just_switched())
 			printf("focus 0x%lx\n", id);
 	} else if (sscanf(l, "activate %lx", &id) == 1) {
 		if ((i = find(id)) >= 0) {
@@ -387,7 +439,7 @@ int main(int argc, char **argv)
 	while ((o = getopt(argc, argv, "l:r:n:g:")) != -1) {
 		switch (o) {
 		case 'l': use_layout(layout_index(optarg)); break;
-		case 'r': ratio = clamp(atoi(optarg), 10, 90); break;
+		case 'r': set_all_ratio(clamp(atoi(optarg), 10, 90)); break;
 		case 'n': nmaster = clamp(atoi(optarg), 0, 50); break;
 		case 'g': gap = clamp(atoi(optarg), 0, 200); break;
 		default:

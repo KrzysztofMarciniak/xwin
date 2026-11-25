@@ -1,10 +1,11 @@
 #!/bin/sh
 # xwinbar.sh - example status script for xwinbar: date, time, battery.
 #
-# xwinbar shows the last line this script prints, so print one line per
-# update and sleep in between:
+# xwinbar shows the last line this script prints into its FIFO, so print one
+# line per update and sleep in between:
 #
-#     xwinbar /path/to/xwinbar.sh
+#     xwinbar "$bfifo" &
+#     /path/to/xwinbar.sh > "$bfifo" &
 #
 # Edit it freely; anything that prints lines will do.
 
