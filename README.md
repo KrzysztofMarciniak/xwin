@@ -10,6 +10,7 @@ Small programs, plain text, one job each. Written in C89, linked only against `l
 | `xwincomposer` | Layout and focus policy. Reads router events, writes router commands. |
 | `xwinkeys` | Key bindings and **the only configuration**. Sends its settings at startup, then turns key presses into commands. |
 | `xwinbar` | Status bar. Reads lines from a FIFO: status lines and `!notifications`. |
+| `xwinmenu` | Program launcher, a dmenu alternative. Lists the executables in `$PATH` in the centre of the screen. |
 
 Everything they say to each other is one line of plain text.
 
@@ -27,7 +28,8 @@ Only `xwinkeys` includes `config.h`. The router and the composer have no config 
 - C compiler (C89 is enough) and `pkg-config`
 - `libxcb` and its headers (the only linked library)
 - `X11/keysym.h` from xorgproto, for `xwinkeys` (header only, nothing from libX11 is linked)
-- a core X font for `xwinbar` (the built-in `fixed` works)
+- a core X font for `xwinbar` and `xwinmenu` (the built-in `fixed` works)
+- a grep-compatible search tool for `xwinmenu` (`grep`)
 
 `XDG_RUNTIME_DIR` is optional. `xinitrc.example` uses it for the FIFO and falls back to `/tmp`. The programs never read it.
 
@@ -54,7 +56,10 @@ cc -std=c89 -pedantic -Wall -Wextra $(pkg-config --cflags xcb) \
 cc -std=c89 -pedantic -Wall -Wextra $(pkg-config --cflags xcb) \
    -o xwinbar xwinbar.c $(pkg-config --libs xcb)
 
-install -m 755 xwinrouter xwincomposer xwinkeys xwinbar /usr/local/bin/
+cc -std=c89 -pedantic -Wall -Wextra $(pkg-config --cflags xcb) \
+   -o xwinmenu xwinmenu.c $(pkg-config --libs xcb)
+
+install -m 755 xwinrouter xwincomposer xwinkeys xwinbar xwinmenu /usr/local/bin/
 install -d /usr/local/share/xwinrouter
 install -m 755 xwinbar.sh /usr/local/share/xwinrouter/
 install -m 755 xwinnotify.sh /usr/local/bin/xwinnotify
@@ -154,7 +159,7 @@ A binding is a modifier mask, an unshifted `XK_*` keysym, and a command line: `{
 | Key | Command |
 | --- | --- |
 | MOD+Shift+Return | `spawn xterm` |
-| MOD+d | `spawn dmenu_run -m '0' -nb '#000000' -nf '#ffffff' -sb '#ffffff' -sf '#000000'` |
+| MOD+d | `spawn xwinmenu` |
 | MOD+Return | `zoom` (focused window to master) |
 | MOD+q / MOD+Shift+q | `close` / `quit` |
 | MOD+j / MOD+k | `focus next` / `focus prev` |
@@ -182,7 +187,7 @@ A binding is a modifier mask, an unshifted `XK_*` keysym, and a command line: `{
 | MOD+Shift+l / MOD+Shift+h | increase / decrease window size |
 | MOD+[1-9] | switch to desktop |
 | MOD+Shift+[1-9] | move focused window to desktop |
-| MOD+p | launch `dmenu` |
+| MOD+p | launch `xwinmenu` |
 
 Desktops are 1-9 (the router supports `1..9`, there is no desktop 0).
 
@@ -243,6 +248,42 @@ xwinnotify                     # clear
 - It opens the FIFO read-write, so it never hangs waiting for a reader.
 
 Use it from anything: `make && xwinnotify done || xwinnotify build FAILED`, a cron job, a key binding (`spawn xwinnotify hello` in `config.h`).
+
+## xwinmenu
+
+```
+xwinmenu
+```
+
+A simple program launcher. It lists every executable found in `$PATH`, sorted, in a box in the centre of the screen. Type to filter, press Enter to launch. It takes no options: its settings are at the top of `xwinmenu.c`. Edit, then `make xwinmenu`.
+
+| Setting | Meaning |
+| --- | --- |
+| `SEARCH_TOOL` | program used to filter the list (default `"grep"`) |
+| `FONT` | core X font (default `"fixed"`) |
+| `BG` / `FG` | background / text color, `0xRRGGBB` (default black / white) |
+| `WIDTH` | window width in pixels |
+| `LINES` | visible entries below the input line |
+| `PAD` / `BORDER` | text padding / border width in pixels |
+
+| Key | Effect |
+| --- | --- |
+| type | filter the list |
+| Backspace / Ctrl-u | delete a character / clear the query |
+| Down, Tab, Ctrl-n | next entry |
+| Up, Ctrl-p | previous entry |
+| Enter | run the selected entry; if nothing matches, run the typed text through `sh -c` |
+| Escape, Ctrl-c | quit |
+
+How it works:
+
+- At startup it scans `$PATH` and writes the names to a temp file in `/tmp`. The file is removed on exit.
+- On every keystroke it runs `SEARCH_TOOL -i -F -e QUERY FILE` and shows the output. Any grep-compatible tool works. The match is case-insensitive and literal, not a regular expression. With an empty query the whole list is shown.
+- The window is override-redirect, so `xwinrouter` does not manage or tile it. It grabs the keyboard while open.
+- Launched programs are detached (`setsid`), so they keep running after the menu closes.
+- It is bound to MOD+d in `config.h`: `{ MOD, XK_d, "spawn xwinmenu" }`. It can also be started by hand: `echo "spawn xwinmenu" > $rt/xwr.fifo`.
+
+Limits: no history, no descriptions, no mouse, no `.desktop` entries, no UTF-8 (core X fonts are Latin-1 only), and the list is read once when the menu opens.
 
 ## Sending lines by hand
 
@@ -474,4 +515,5 @@ Run it like the real one: `./xwinkeys > "$fifo" &`. Any program that writes the 
 - If the router restarts, restart `xwincomposer` and `xwinkeys` too. `xinitrc.example` starts all three together, and `xwinkeys` resends settings on startup. `xwinkeys` exits on the next key press once nobody reads the FIFO.
 - If the composer hangs and stops reading, the router eventually blocks on output.
 - `xwinbar` has no tag or window list, no clickable parts, and no UTF-8.
+- `xwinmenu` is only a launcher for programs in `$PATH`. See its section for limits.
 - Tested under Xvfb with test windows, injected key presses, and the bar (struts, top and bottom, started before and after the router). Real applications have not been tested.
