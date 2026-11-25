@@ -379,7 +379,7 @@ Any program works if it prints `dump` first, reads the events above, and prints 
 
 ## Minimal examples
 
-Two bare replacements, to show how little a part needs to be. Both were tested: the composer by feeding it events, the key program under Xvfb with injected key presses.
+Two bare replacements, to show how little a part needs to be.
 
 ### A composer in 36 lines of sh
 
@@ -499,25 +499,3 @@ cc -o xwinkeys xwinkeys.c -lxcb
 
 Run it like the real one: `./xwinkeys > "$fifo" &`. Any program that writes the same lines would do, including a shell script: `echo "view 2" > "$fifo"`.
 
-## Design notes
-
-- Windows are not reparented. Borders are the client's own. Windows on other tags are moved off-screen, not unmapped.
-- A router crash leaves windows alive. Restarting re-adopts them, all on the current tag.
-- On shutdown, hidden windows are moved back on screen.
-- New tiled windows first get the full work area, then the layout moves them.
-- Floating windows and dialogs (transient, dialog, splash, utility) are centered if they ask for position 0,0.
-- Dock windows (`_NET_WM_WINDOW_TYPE_DOCK`) are not tiled. Their struts shrink the work area.
-- Minimal EWMH: client list, active window, desktop count and current desktop, supporting WM check, fullscreen state.
-- Only the router holds the WM role. Key grabs work from any X client, which is why `xwinkeys` is a separate process.
-
-## Limits
-
-- Bindings and settings are compiled into `xwinkeys`. No runtime config file.
-- Only one X client can grab a given key combination.
-- No click-to-focus, window rules, multi-monitor awareness (the screen is one rectangle), or mouse bindings.
-- With focus following the mouse, a new window can lose focus to whatever ends up under the pointer after relayout.
-- If the router restarts, restart `xwincomposer` and `xwinkeys` too. `xinitrc.example` starts all three together, and `xwinkeys` resends settings on startup. `xwinkeys` exits on the next key press once nobody reads the FIFO.
-- If the composer hangs and stops reading, the router eventually blocks on output.
-- `xwinbar` has no tag or window list, no clickable parts, and no UTF-8.
-- `xwinmenu` is only a launcher for programs in `$PATH`. See its section for limits.
-- Tested under Xvfb with test windows, injected key presses, and the bar (struts, top and bottom, started before and after the router). Real applications have not been tested.
