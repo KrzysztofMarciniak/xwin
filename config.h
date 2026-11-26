@@ -28,6 +28,9 @@ static const char *settings[] = {
 	"set gap 0",                    /* pixels around every window */
 	"set focus_follows_mouse 1",
 	"set focus_new_window 1",
+
+	/* --- floating windows --- */
+	"set mouse_mod super",          /* super|alt|ctrl|off: MOD+left drag moves, MOD+right drag resizes */
 };
 
 /* --- keys --- */
@@ -69,4 +72,15 @@ static const struct key keys[] = {
 	TAGKEY(XK_7, 7)
 	TAGKEY(XK_8, 8)
 	TAGKEY(XK_9, 9)
+
+	/* floating windows: move, resize, centre (30 pixels per press) */
+	{ MOD,         XK_Left,   "move @ -30 0" },
+	{ MOD,         XK_Right,  "move @ 30 0" },
+	{ MOD,         XK_Up,     "move @ 0 -30" },
+	{ MOD,         XK_Down,   "move @ 0 30" },
+	{ MOD | SHIFT, XK_Left,   "resize @ -30 0" },
+	{ MOD | SHIFT, XK_Right,  "resize @ 30 0" },
+	{ MOD | SHIFT, XK_Up,     "resize @ 0 -30" },
+	{ MOD | SHIFT, XK_Down,   "resize @ 0 30" },
+	{ MOD,         XK_c,      "center @" },
 };

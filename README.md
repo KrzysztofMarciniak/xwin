@@ -131,6 +131,7 @@ Each line is sent to the FIFO when `xwinkeys` starts. To apply a change: edit, r
 | `set color_normal RRGGBB` | router | other borders |
 | `set floating 0\|1` | router | `0`: everything is tiled, dialogs too, `float` does nothing |
 | `set fullscreen 0\|1` | router | `0`: fullscreen requests and the command are ignored |
+| `set mouse_mod super\|alt\|ctrl\|off` | router | modifier for mouse drag: MOD+left button moves, MOD+right button resizes. `off` releases the buttons |
 | `set tags N` | router | `1`..`9`. `1` turns tagging off: `view` and `tag` do nothing |
 | `set layouts NAME...` | composer | layouts `layout next` cycles through; omit a name to disable it |
 | `set layout NAME` | composer | starting layout |
@@ -173,8 +174,21 @@ A binding is a modifier mask, an unshifted `XK_*` keysym, and a command line: `{
 | MOD+, / MOD+. | `master +1` / `master -1` |
 | MOD+f | `fullscreen @` |
 | MOD+Shift+Space | `float @` |
+| MOD+arrows | `move @ DX DY` (30 px, floating windows) |
+| MOD+Shift+arrows | `resize @ DW DH` (30 px, floating windows) |
+| MOD+c | `center @` |
 | MOD+1..9 | `view N` |
 | MOD+Shift+1..9 | `tag @ N` |
+
+## Floating windows
+
+Dialogs, splash screens, utility windows, anything with `WM_TRANSIENT_FOR`, and windows with a fixed size (min size equals max size) float on their own. Any other window floats with `float @`, or by grabbing it with the mouse.
+
+- Floating windows are always above tiled ones, in every layout. Fullscreen windows are above those.
+- A dialog opens centred over its parent. A program that asks for a position (`USPosition`/`PPosition`) gets it. Everything else opens centred in the work area, and no window opens larger than the work area.
+- MOD+left drag moves, MOD+right drag resizes (bottom-right corner). Grabbing a tiled window floats it first. See `set mouse_mod`.
+- Move and resize keep at least 40 px of the window on screen. Resizing respects the program's min and max size.
+- The router remembers each window's floating geometry. Tile it and float it again and it comes back where it was.
 
 ## Creator's settings patch
 
@@ -336,7 +350,10 @@ Written to the router FIFO, read by `xwinrouter`. `ID` is hex such as `0x400003`
 | `close [ID]` | ask the window to close (default: focused) |
 | `tag ID N` | move window to tag N |
 | `view N` | show tag N |
-| `float ID [0\|1]` | set or toggle floating |
+| `float ID [0\|1]` | set or toggle floating. The window gets back the geometry it had the last time it floated; one that fills the screen is shrunk to 70% and centred |
+| `move ID DX DY` | move a floating window by DX, DY. At least 40 px stay on screen |
+| `resize ID DW DH` | grow or shrink a floating window, within its min/max size hints |
+| `center ID` | centre a floating window in the work area |
 | `fullscreen ID [0\|1]` | set or toggle fullscreen |
 | `raise ID` | raise window |
 | `spawn COMMAND...` | run through `sh -c` |

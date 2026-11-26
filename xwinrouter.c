@@ -11,7 +11,10 @@
  *   close [ID]
  *   tag ID N               move window to tag N (1-9)
  *   view N                 show tag N
- *   float ID [0|1]         no value = toggle
+ *   float ID [0|1]         no value = toggle; remembers the floating geometry
+ *   move ID DX DY          floating windows only, relative, stays on screen
+ *   resize ID DW DH        floating windows only, honours the size hints
+ *   center ID              floating windows only, centre in the work area
  *   fullscreen ID [0|1]
  *   raise ID
  *   spawn COMMAND...       run through sh -c
@@ -28,6 +31,9 @@
  * Settings (xwinkeys sends them at startup; see config.h there):
  *   set border N | color_focus RRGGBB | color_normal RRGGBB
  *   set floating 0|1 | fullscreen 0|1 | tags 1..9
+ *   set mouse_mod super|alt|ctrl|off
+ *                          MOD+left drag moves, MOD+right drag resizes; a
+ *                          tiled window grabbed this way becomes floating
  *   set <anything else>    kept, forwarded as "bind set ..." and replayed
  *                          to the composer on "dump"
  */
@@ -50,6 +56,10 @@
 static int border_w = 2;
 static unsigned long col_focus = 0x5e81ac, col_normal = 0x3b4252;
 static int en_floating = 1, en_fullscreen = 1, ntags = 9;
+static unsigned int mouse_mod = XCB_MOD_MASK_4;
+
+#define MINVIS  40     /* pixels of a floating window that must stay on screen */
+#define MINSIZE 32     /* smallest content size when the client gives no hint */
 
 /* "set" lines meant for xwincomposer, remembered so "dump" can replay them */
 static char fset[MAXFSET][128];
@@ -59,6 +69,8 @@ struct client {
 	xcb_window_t win;
 	int x, y, w, h;            /* outer geometry, border included */
 	int sx, sy, sw, sh;        /* saved while fullscreen */
+	int fx, fy, fw, fh, fhave; /* last floating geometry, for the next float */
+	int minw, minh, maxw, maxh;/* WM_NORMAL_HINTS, content size, 0: none */
 	int tag;
 	int floating, fullscreen, dock;
 	int strut[4];              /* left right top bottom (docks) */
@@ -89,6 +101,11 @@ static struct client *clients, *focused;
 static int view = 1, quiet, all_visible;
 static int wax, way, waw, wah;
 static volatile sig_atomic_t quit;
+
+static struct {
+	struct client *c;
+	int resize, px, py, ox, oy, ow, oh;
+} drag;
 
 /* ---------- helpers ---------- */
 
@@ -231,6 +248,82 @@ static void raise_win(struct client *c)
 	xcb_configure_window(conn, c->win, XCB_CONFIG_WINDOW_STACK_MODE, &m);
 }
 
+/* floating windows stay above tiled ones; fullscreen above those */
+static void raise_floats(void)
+{
+	struct client *c;
+
+	for (c = clients; c; c = c->next)
+		if (!c->dock && c->floating && !c->fullscreen && c != focused && visible(c))
+			raise_win(c);
+	for (c = clients; c; c = c->next)
+		if (!c->dock && c->fullscreen && c != focused && visible(c))
+			raise_win(c);
+	if (focused && (focused->floating || focused->fullscreen) && visible(focused))
+		raise_win(focused);
+}
+
+static int clampi(int v, int lo, int hi)
+{
+	return v < lo ? lo : v > hi ? hi : v;
+}
+
+/* outer size w x h -> nearest size the client's hints allow */
+static void limit_size(const struct client *c, int *w, int *h)
+{
+	int iw = *w - 2 * border_w, ih = *h - 2 * border_w;
+
+	if (iw > waw - 2 * border_w)             /* never bigger than the screen */
+		iw = waw - 2 * border_w;
+	if (ih > wah - 2 * border_w)
+		ih = wah - 2 * border_w;
+	if (iw < MINSIZE)
+		iw = MINSIZE;
+	if (ih < MINSIZE)
+		ih = MINSIZE;
+	if (c->minw && iw < c->minw)
+		iw = c->minw;
+	if (c->minh && ih < c->minh)
+		ih = c->minh;
+	if (c->maxw && iw > c->maxw)
+		iw = c->maxw;
+	if (c->maxh && ih > c->maxh)
+		ih = c->maxh;
+	*w = iw + 2 * border_w;
+	*h = ih + 2 * border_w;
+}
+
+/* keep a floating window reachable. loose: only MINVIS pixels have to show
+ * (dragging); otherwise the whole window is pulled into the work area */
+static void confine(struct client *c, int loose)
+{
+	int lo, hi;
+
+	if (!loose) {
+		if (c->w > waw)
+			c->w = waw;
+		if (c->h > wah)
+			c->h = wah;
+		lo = wax;
+		hi = wax + waw - c->w;
+	} else {
+		lo = wax - c->w + MINVIS;
+		hi = wax + waw - MINVIS;
+	}
+	c->x = clampi(c->x, lo, hi < lo ? lo : hi);
+	lo = way;
+	hi = loose ? way + wah - MINVIS : way + wah - c->h;
+	c->y = clampi(c->y, lo, hi < lo ? lo : hi);
+}
+
+static void save_float(struct client *c)
+{
+	if (c->floating && !c->fullscreen && !c->dock) {
+		c->fx = c->x; c->fy = c->y; c->fw = c->w; c->fh = c->h;
+		c->fhave = 1;
+	}
+}
+
 static void border(struct client *c, uint32_t col)
 {
 	xcb_change_window_attributes(conn, c->win, XCB_CW_BORDER_PIXEL, &col);
@@ -306,6 +399,36 @@ static void set_fullscreen(struct client *c, int v)
 	emit("fullscreen 0x%lx %d", (unsigned long)c->win, c->fullscreen);
 }
 
+/* v: 0, 1 or -1 to toggle. Going floating restores the geometry the window
+ * had last time it floated; a first-time window that fills the screen is
+ * shrunk and centred so there is something to see around it. */
+static void set_float(struct client *c, int v)
+{
+	if (!en_floating || c->dock || c->fullscreen)
+		return;
+	if (v < 0)
+		v = !c->floating;
+	if (v == c->floating)
+		return;
+	c->floating = v;
+	if (v) {
+		if (c->fhave) {
+			c->x = c->fx; c->y = c->fy; c->w = c->fw; c->h = c->fh;
+		} else if (c->w * 100 > waw * 85 && c->h * 100 > wah * 85) {
+			c->w = waw * 7 / 10;
+			c->h = wah * 7 / 10;
+			c->x = wax + (waw - c->w) / 2;
+			c->y = way + (wah - c->h) / 2;
+		}
+		limit_size(c, &c->w, &c->h);
+		confine(c, 0);
+		save_float(c);
+		apply(c);
+		raise_win(c);
+	}
+	emit("float 0x%lx %d", (unsigned long)c->win, c->floating);
+}
+
 static void set_view(int n)
 {
 	struct client *c;
@@ -343,8 +466,9 @@ static void manage(xcb_window_t w)
 {
 	xcb_get_window_attributes_reply_t *a;
 	xcb_get_geometry_reply_t *g;
-	struct client *c, **p;
-	uint32_t mask, tr;
+	struct client *c, *pc, **p;
+	uint32_t mask, tr, h[18];
+	int has_tr, pos = 0;
 
 	if (find(w))
 		return;
@@ -379,20 +503,35 @@ static void manage(xcb_window_t w)
 	}
 
 	c->tag = view;
+	if (prop32(w, XCB_ATOM_WM_NORMAL_HINTS, XCB_ATOM_WM_SIZE_HINTS, h, 18) >= 9) {
+		pos = (h[0] & 5) != 0;                 /* USPosition | PPosition */
+		if (h[0] & 16) { c->minw = (int)h[5]; c->minh = (int)h[6]; }
+		if (h[0] & 32) { c->maxw = (int)h[7]; c->maxh = (int)h[8]; }
+	}
+	has_tr = prop32(w, XCB_ATOM_WM_TRANSIENT_FOR, XCB_ATOM_WINDOW, &tr, 1) == 1;
 	c->floating = en_floating &&
-	    (prop32(w, XCB_ATOM_WM_TRANSIENT_FOR, XCB_ATOM_WINDOW, &tr, 1) == 1
+	    (has_tr
 	    || has_atom(w, atom[A_TYPE], atom[A_TYPE_DIALOG])
 	    || has_atom(w, atom[A_TYPE], atom[A_TYPE_SPLASH])
-	    || has_atom(w, atom[A_TYPE], atom[A_TYPE_UTILITY]));
+	    || has_atom(w, atom[A_TYPE], atom[A_TYPE_UTILITY])
+	    || (c->maxw > 0 && c->maxw == c->minw && c->maxh == c->minh));   /* fixed size */
 	if (c->floating) {
 		c->w = g->width + 2 * border_w;
 		c->h = g->height + 2 * border_w;
-		c->x = g->x;
-		c->y = g->y;
-		if ((c->x <= 0 && c->y <= 0) || c->x + c->w <= 0) {    /* centre */
+		limit_size(c, &c->w, &c->h);
+		pc = has_tr ? find(tr) : NULL;
+		if (pos && (g->x || g->y)) {            /* the program asked for a place */
+			c->x = g->x;
+			c->y = g->y;
+		} else if (pc && !pc->dock) {           /* dialogs open over their parent */
+			c->x = pc->x + (pc->w - c->w) / 2;
+			c->y = pc->y + (pc->h - c->h) / 2;
+		} else {
 			c->x = wax + (waw - c->w) / 2;
 			c->y = way + (wah - c->h) / 2;
 		}
+		confine(c, 0);
+		save_float(c);
 	} else {                 /* sane default until the layout answers */
 		c->x = wax;
 		c->y = way;
@@ -406,6 +545,8 @@ static void manage(xcb_window_t w)
 	border(c, col_normal);
 	apply(c);
 	xcb_map_window(conn, w);
+	if (!c->floating)
+		raise_floats();
 	ewmh_clients();
 	emit("map 0x%lx %d %d", (unsigned long)w, c->tag, c->floating);
 	if (has_atom(w, atom[A_STATE], atom[A_FULLSCREEN]))
@@ -423,6 +564,8 @@ static void unmanage(struct client *c)
 		;
 	if (*p)
 		*p = c->next;
+	if (drag.c == c)
+		drag.c = NULL;
 	free(c);
 	if (was_focused)
 		focused = NULL;
@@ -540,6 +683,31 @@ static void remember(const char *line, const char *key)
 	fset[i][n] = 0;
 }
 
+/* MOD+button 1 moves, MOD+button 3 resizes: passive grabs on the root, with
+ * and without caps/num lock */
+static void grab_mouse(void)
+{
+	unsigned int locks[4];
+	int i, b;
+
+	locks[0] = 0;
+	locks[1] = XCB_MOD_MASK_LOCK;
+	locks[2] = XCB_MOD_MASK_2;
+	locks[3] = XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2;
+	for (b = 1; b <= 3; b += 2) {
+		xcb_ungrab_button(conn, b, scr->root, XCB_MOD_MASK_ANY);
+		if (!mouse_mod)
+			continue;
+		for (i = 0; i < 4; i++)
+			xcb_grab_button(conn, 0, scr->root,
+			    XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE |
+			    XCB_EVENT_MASK_BUTTON_MOTION,
+			    XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC, XCB_NONE, XCB_NONE,
+			    b, mouse_mod | locks[i]);
+	}
+	xcb_flush(conn);
+}
+
 /* set KEY VALUE...: router settings apply here, the rest goes to the composer */
 static void setting(char **v, int n)
 {
@@ -566,6 +734,16 @@ static void setting(char **v, int n)
 		en_fullscreen = !!a;
 	} else if (!strcmp(v[1], "tags")) {
 		set_ntags(a);
+	} else if (!strcmp(v[1], "mouse_mod")) {
+		if (!strcmp(v[2], "super"))
+			mouse_mod = XCB_MOD_MASK_4;
+		else if (!strcmp(v[2], "alt"))
+			mouse_mod = XCB_MOD_MASK_1;
+		else if (!strcmp(v[2], "ctrl"))
+			mouse_mod = XCB_MOD_MASK_CONTROL;
+		else if (!strcmp(v[2], "off"))
+			mouse_mod = 0;
+		grab_mouse();
 	} else {
 		strcpy(b, "set");
 		for (i = 1; i < n; i++) {
@@ -605,6 +783,7 @@ static void run(const char *line)
 			c->y = atoi(v[3]);
 			c->w = atoi(v[4]);
 			c->h = atoi(v[5]);
+			save_float(c);
 			apply(c);
 		}
 	} else if (!strcmp(v[0], "focus") && n >= 2) {
@@ -632,11 +811,35 @@ static void run(const char *line)
 		set_view(atoi(v[1]));
 	} else if (!strcmp(v[0], "float")) {
 		c = lookup(n >= 2 ? v[1] : NULL);
-		if (en_floating && c && !c->dock) {
-			c->floating = n >= 3 ? !!atoi(v[2]) : !c->floating;
-			if (c->floating)
-				raise_win(c);
-			emit("float 0x%lx %d", (unsigned long)c->win, c->floating);
+		if (c)
+			set_float(c, n >= 3 ? !!atoi(v[2]) : -1);
+	} else if (!strcmp(v[0], "move") && n >= 4) {
+		c = lookup(v[1]);
+		if (c && c->floating && !c->fullscreen && !c->dock) {
+			c->x += atoi(v[2]);
+			c->y += atoi(v[3]);
+			confine(c, 1);
+			save_float(c);
+			apply(c);
+		}
+	} else if (!strcmp(v[0], "resize") && n >= 4) {
+		c = lookup(v[1]);
+		if (c && c->floating && !c->fullscreen && !c->dock) {
+			c->w += atoi(v[2]);
+			c->h += atoi(v[3]);
+			limit_size(c, &c->w, &c->h);
+			confine(c, 1);
+			save_float(c);
+			apply(c);
+		}
+	} else if (!strcmp(v[0], "center") && n >= 2) {
+		c = lookup(v[1]);
+		if (c && c->floating && !c->fullscreen && !c->dock) {
+			c->x = wax + (waw - c->w) / 2;
+			c->y = way + (wah - c->h) / 2;
+			confine(c, 0);
+			save_float(c);
+			apply(c);
 		}
 	} else if (!strcmp(v[0], "fullscreen")) {
 		c = lookup(n >= 2 ? v[1] : NULL);
@@ -644,8 +847,11 @@ static void run(const char *line)
 			set_fullscreen(c, n >= 3 ? !!atoi(v[2]) : -1);
 	} else if (!strcmp(v[0], "raise") && n >= 2) {
 		c = lookup(v[1]);
-		if (c && !c->dock)
+		if (c && !c->dock) {
 			raise_win(c);
+			if (!c->floating)
+				raise_floats();
+		}
 	} else if (!strcmp(v[0], "set") && n >= 3) {
 		setting(v, n);
 	} else if (!strcmp(v[0], "dump")) {
@@ -689,6 +895,7 @@ static void configure_request(xcb_configure_request_event_t *e)
 		if (e->value_mask & XCB_CONFIG_WINDOW_Y)      c->y = e->y;
 		if (e->value_mask & XCB_CONFIG_WINDOW_WIDTH)  c->w = e->width + 2 * border_w;
 		if (e->value_mask & XCB_CONFIG_WINDOW_HEIGHT) c->h = e->height + 2 * border_w;
+		save_float(c);
 		apply(c);
 	} else {                                       /* not ours: pass through */
 		if (e->value_mask & XCB_CONFIG_WINDOW_X)            v[i++] = e->x;
@@ -700,6 +907,58 @@ static void configure_request(xcb_configure_request_event_t *e)
 		if (e->value_mask & XCB_CONFIG_WINDOW_STACK_MODE)   v[i++] = e->stack_mode;
 		xcb_configure_window(conn, e->window, e->value_mask, v);
 	}
+}
+
+static void button_press(xcb_button_press_event_t *e)
+{
+	struct client *c = find(e->child);
+
+	if (!en_floating || !c || c->dock || c->fullscreen || !visible(c))
+		return;
+	set_float(c, 1);                      /* grabbing a tiled window floats it */
+	if (!c->floating)
+		return;
+	if (e->detail == 1 && (e->root_x < c->x || e->root_x >= c->x + c->w ||
+	    e->root_y < c->y || e->root_y >= c->y + c->h)) {
+		c->x = e->root_x - c->w / 2;      /* it shrank away from the pointer */
+		c->y = e->root_y - c->h / 2;
+		confine(c, 1);
+		save_float(c);
+		apply(c);
+	}
+	set_focus(c);
+	drag.c = c;
+	drag.resize = e->detail == 3;
+	drag.px = e->root_x;
+	drag.py = e->root_y;
+	drag.ox = c->x;
+	drag.oy = c->y;
+	drag.ow = c->w;
+	drag.oh = c->h;
+}
+
+static void motion(xcb_motion_notify_event_t *e)
+{
+	struct client *c = drag.c;
+	int dx = e->root_x - drag.px, dy = e->root_y - drag.py;
+
+	if (!c)
+		return;
+	if (!c->floating || c->fullscreen) {
+		drag.c = NULL;
+		return;
+	}
+	if (drag.resize) {
+		c->w = drag.ow + dx;
+		c->h = drag.oh + dy;
+		limit_size(c, &c->w, &c->h);
+	} else {
+		c->x = drag.ox + dx;
+		c->y = drag.oy + dy;
+	}
+	confine(c, 1);
+	save_float(c);
+	apply(c);
 }
 
 static void event(xcb_generic_event_t *ev)
@@ -715,6 +974,15 @@ static void event(xcb_generic_event_t *ev)
 			xcb_map_window(conn, e->window);
 		break;
 	}
+	case XCB_BUTTON_PRESS:
+		button_press((xcb_button_press_event_t *)ev);
+		break;
+	case XCB_MOTION_NOTIFY:
+		motion((xcb_motion_notify_event_t *)ev);
+		break;
+	case XCB_BUTTON_RELEASE:
+		drag.c = NULL;
+		break;
 	case XCB_CONFIGURE_REQUEST:
 		configure_request((xcb_configure_request_event_t *)ev);
 		break;
@@ -808,6 +1076,8 @@ static int setup(void)
 		atom[i] = r ? r->atom : XCB_NONE;
 		free(r);
 	}
+
+	grab_mouse();
 
 	/* the EWMH minimum that bars and apps expect */
 	checkwin = xcb_generate_id(conn);
