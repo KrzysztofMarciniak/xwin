@@ -1,8 +1,17 @@
 # xwin
 
-A collection of lightweight, modular tools that apply Unix philosophy to tiling window management.
+Small, modular tiling window management for X11. Plain text between the parts, one job per program, C89, linked only against `libxcb`.
 
-Small programs, plain text, one job each. Written in C89, linked only against `libxcb`.
+```
+             key presses                          events (stdout)
+ xwinkeys ──────────────────►  FIFO  ──►  xwinrouter ─────────────► xwincomposer
+ (config.h)   command lines      ▲        (the WM)                  (layout, focus)
+                                 │                                        │
+                                 └────────────────────────────────────────┘
+                                        geom / focus / raise commands
+```
+
+**Stuck? Press Super+F1.** `xwinhelp` shows every key binding and setting of your current `config.h`.
 
 | Program | Job |
 | --- | --- |
@@ -10,73 +19,81 @@ Small programs, plain text, one job each. Written in C89, linked only against `l
 | `xwincomposer` | Layout and focus policy. Reads router events, writes router commands. |
 | `xwinkeys` | Key bindings and **the only configuration**. Sends its settings at startup, then turns key presses into commands. |
 | `xwinbar` | Status bar. Reads lines from a FIFO: status lines and `!notifications`. |
-| `xwinhelp` | Help viewer. Generates the key and settings list from `config.h`, writes `help.txt` and shows it in a window. MOD+F1. |
-| `xwinmenu` | Program launcher, a dmenu alternative. Lists the executables in `$PATH` in the centre of the screen. |
+| `xwinmenu` | Program launcher, a dmenu alternative. Lists the executables in `$PATH`. |
+| `xwinhelp` | Help viewer. Builds the key and settings list from `config.h`, writes `help.txt` and shows it in a window. |
 
+Everything they say to each other is one line of plain text. Anything that can write a line to a FIFO can control the window manager: `echo "view 2" > "$fifo"`.
 
-Everything they say to each other is one line of plain text.
+Looking for a terminal? See [xxt](https://github.com/KrzysztofMarciniak/xxt), a terminal emulator in about 400 lines of C with patch support (vi mode, libvterm and more).
 
-**Looking for a terminal?**
-I also created [xxt](https://github.com/KrzysztofMarciniak/xxt), a lightweight terminal emulator written in just 400 LOC, with patch support (vi mode, libvterm and many more).
+## Contents
 
-1. `xwinkeys` grabs the shortcut keys listed in `config.h`. Only those: all other typing goes straight to the focused window. At startup it writes its settings to the FIFO, then one command line (for example `focus next`) for every shortcut you press.
-2. `xwinrouter` reads the FIFO. Commands it knows (`focus`, `close`, `tag`, `view`, `spawn`, `geom`, ...) it executes itself. Anything else it prints on its stdout as a `bind` event. It also prints an event for everything that happens on screen: window opened, window closed, focus changed, usable area changed.
-3. `xwincomposer` reads those events from the router's stdout, decides where every window goes, and writes `geom`, `focus` and `raise` commands to the FIFO. The router reads them there and applies them.
-4. `xwinbar` is independent. It reads lines from its own FIFO (and optionally runs a script that prints lines), shows the last status line, shows `!` lines as timed notifications, and tells the router to keep that strip of the screen free.
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [Configuration](#configuration)
+- [Default keys](#default-keys)
+- [Floating windows](#floating-windows)
+- [xwinbar and xwinnotify](#xwinbar-and-xwinnotify)
+- [xwinmenu](#xwinmenu)
+- [xwinhelp](#xwinhelp)
+- [Talking to the router](#talking-to-the-router)
+- [Writing your own parts](#writing-your-own-parts)
+- [Troubleshooting](#troubleshooting)
 
-The loop is closed by the last line of `xinitrc.example`: the router's stdout is piped into the composer, and the composer's stdout goes back into the FIFO that the router reads.
+## Quick start
 
-Only `xwinkeys` includes `config.h`. The router and the composer have no config file and no compile-time options. They are configured at runtime by `set` commands, so changing a setting never means rebuilding them.
-
-## Requirements
+Requirements:
 
 - C compiler (C89 is enough) and `pkg-config`
 - `libxcb` and its headers (the only linked library)
-- `X11/keysym.h` from xorgproto, for `xwinkeys` (header only, nothing from libX11 is linked)
-- a core X font for `xwinbar` and `xwinmenu` (the built-in `fixed` works)
-- a grep-compatible search tool for `xwinmenu` (`grep`)
-
-`XDG_RUNTIME_DIR` is optional. `xinitrc.example` uses it for the FIFO and falls back to `/tmp`. The programs never read it.
-
-## Build
+- `X11/keysym.h` from xorgproto, for `xwinkeys` and `xwinhelp` (header only, nothing from libX11 is linked)
+- a core X font for `xwinbar`, `xwinmenu` and `xwinhelp` (the built-in `fixed` works)
+- `grep` for `xwinmenu`
 
 ```
 make
-make install        # PREFIX=/usr/local by default
+make install            # PREFIX=/usr/local by default
+cp xinitrc.example ~/.xinitrc
+startx
 ```
 
-Or by hand:
+Windows that are already open when the router starts are adopted. The bar can start before or after the router.
+
+To try it first in a nested server:
 
 ```
-pkg-config --cflags --libs xcb
+mkfifo fifo
+Xephyr :1 -screen 1280x800 &
+export DISPLAY=:1
+xwinkeys > fifo &
+xwinrouter < fifo | xwincomposer > fifo &
+xwinbar &
+sleep 1; ./xwinbar.sh > "${XDG_RUNTIME_DIR:-/tmp}/xwinbar.fifo" &
+xterm &
+```
 
-cc -std=c89 -pedantic -Wall -Wextra $(pkg-config --cflags xcb) \
-   -o xwinrouter xwinrouter.c $(pkg-config --libs xcb)
+<details>
+<summary>Building by hand, without make</summary>
 
+```
+cc -std=c89 -pedantic -Wall -Wextra $(pkg-config --cflags xcb) -o xwinrouter xwinrouter.c $(pkg-config --libs xcb)
 cc -std=c89 -pedantic -Wall -Wextra -o xwincomposer xwincomposer.c
+cc -std=c89 -pedantic -Wall -Wextra $(pkg-config --cflags xcb) -o xwinkeys xwinkeys.c $(pkg-config --libs xcb)
+cc -std=c89 -pedantic -Wall -Wextra $(pkg-config --cflags xcb) -o xwinbar xwinbar.c $(pkg-config --libs xcb)
+cc -std=c89 -pedantic -Wall -Wextra $(pkg-config --cflags xcb) -o xwinmenu xwinmenu.c $(pkg-config --libs xcb)
+cc -std=c89 -pedantic -Wall -Wextra $(pkg-config --cflags xcb) -o xwinhelp xwinhelp.c $(pkg-config --libs xcb)
 
-cc -std=c89 -pedantic -Wall -Wextra $(pkg-config --cflags xcb) \
-   -o xwinkeys xwinkeys.c $(pkg-config --libs xcb)
-
-cc -std=c89 -pedantic -Wall -Wextra $(pkg-config --cflags xcb) \
-   -o xwinbar xwinbar.c $(pkg-config --libs xcb)
-
-cc -std=c89 -pedantic -Wall -Wextra $(pkg-config --cflags xcb) \
-   -o xwinmenu xwinmenu.c $(pkg-config --libs xcb)
-
-install -m 755 xwinrouter xwincomposer xwinkeys xwinbar xwinmenu /usr/local/bin/
+install -m 755 xwinrouter xwincomposer xwinkeys xwinbar xwinmenu xwinhelp /usr/local/bin/
 install -d /usr/local/share/xwinrouter
 install -m 755 xwinbar.sh /usr/local/share/xwinrouter/
 install -m 755 xwinnotify.sh /usr/local/bin/xwinnotify
-
-cp xinitrc.example ~/.xinitrc
 ```
 
-After editing `config.h`, rebuild only `xwinkeys`.
+</details>
 
-## Run
+### `~/.xinitrc`
 
-`~/.xinitrc` (this is `xinitrc.example`):
+This is `xinitrc.example`:
 
 ```sh
 #!/bin/sh
@@ -100,30 +117,28 @@ xwinkeys > "$fifo" &
 xwinrouter < "$fifo" | xwincomposer > "$fifo"
 ```
 
-Then `startx`. Windows already open when the router starts are adopted. The bar can start before or after the router.
+`XDG_RUNTIME_DIR` is optional. The scripts use it for the FIFOs and fall back to `/tmp`; the programs never read it, except `xwinhelp`, which puts `help.txt` there.
 
-Try it in a nested server:
+## How it works
 
-```
-mkfifo fifo
-Xephyr :1 -screen 1280x800 &
-export DISPLAY=:1
-xwinkeys > fifo &
-xwinrouter < fifo | xwincomposer > fifo &
-xwinbar &
-sleep 1; ./xwinbar.sh > "${XDG_RUNTIME_DIR:-/tmp}/xwinbar.fifo" &
-xterm &
-```
+1. `xwinkeys` grabs the shortcut keys listed in `config.h`. Only those: all other typing goes straight to the focused window. At startup it writes its settings to the FIFO, then one command line (for example `focus next`) for every shortcut you press.
+2. `xwinrouter` reads the FIFO. Commands it knows (`focus`, `close`, `tag`, `view`, `spawn`, `geom`, ...) it executes itself. Anything else it prints on stdout as a `bind` event. It also prints an event for everything that happens on screen: window opened, window closed, focus changed, usable area changed.
+3. `xwincomposer` reads those events, decides where every window goes, and writes `geom`, `focus` and `raise` commands to the FIFO. The router reads them there and applies them.
+4. `xwinbar` is independent. It reads lines from its own FIFO, shows the last status line, shows `!` lines as timed notifications, and tells the router to keep its strip of the screen free.
 
-Anything that can write a line to the FIFO can control the window manager: `echo "view 2" > "$fifo"`.
+The loop is closed by the last line of `~/.xinitrc`: the router's stdout goes into the composer, and the composer's stdout goes back into the FIFO the router reads.
+
+Only `xwinkeys` and `xwinhelp` include `config.h`. The router and the composer have no config file and no compile-time options: they are configured at runtime by `set` commands, so changing a setting never means rebuilding them.
 
 ## Configuration
 
-`config.h` has two tables and is read by `xwinkeys` only.
+`config.h` is the only configuration. It has two tables.
+
+After editing it, rebuild **`xwinkeys`** (and `xwinhelp`, so the help matches) and restart `xwinkeys`.
 
 ### `settings[]`
 
-Each line is sent to the FIFO when `xwinkeys` starts. To apply a change: edit, rebuild `xwinkeys`, restart it.
+Each line is sent to the FIFO when `xwinkeys` starts.
 
 | Setting | For | Values |
 | --- | --- | --- |
@@ -144,19 +159,30 @@ Each line is sent to the FIFO when `xwinkeys` starts. To apply a change: edit, r
 
 Layouts:
 
-- `tile`: master column left, stack right
-- `bstack`: master row on top, stack row below
-- `spiral`: each window takes a share of what is left
-- `grid`: equal cells
-- `mono`: one window at a time, full size
+| Name | Shape |
+| --- | --- |
+| `tile` | master column left, stack right |
+| `bstack` | master row on top, stack row below |
+| `spiral` | each window takes a share of what is left |
+| `grid` | equal cells |
+| `mono` | one window at a time, full size |
 
-The router remembers the settings it forwards and replays them on `dump`, so restarting the composer alone loses nothing.
-
-There is no click-to-focus. With `focus_follows_mouse 0`, use `focus next` / `focus prev`.
+The router remembers the settings it forwards and replays them on `dump`, so restarting the composer alone loses nothing. There is no click-to-focus: with `focus_follows_mouse 0`, use `focus next` / `focus prev`.
 
 ### `keys[]`
 
-A binding is a modifier mask, an unshifted `XK_*` keysym, and a command line: `{ MOD, XK_w, "spawn firefox" }`. Put `SHIFT` in the mask for shifted keys. Bindings for disabled features are harmless; the command is sent and ignored.
+A binding is a modifier mask, an unshifted `XK_*` keysym and a command line:
+
+```c
+{ MOD,         XK_w, "spawn firefox" },
+{ MOD | SHIFT, XK_w, "spawn firefox -private-window" },
+```
+
+Put `SHIFT` in the mask for shifted keys. Bindings for disabled features are harmless: the command is sent and ignored. `MOD` is Super (`XCB_MOD_MASK_4`); change the `#define` at the top of the table to use another modifier.
+
+### Minimal setup patch
+
+`apply_creator_patches.sh` applies `creator.patch` to `config.h`: tile layout only, black and white borders, terminal `xxt` on MOD+Return, `xwinmenu` on MOD+p, `xwinhelp` on MOD+F1. Run it in the source directory, then `make xwinkeys xwinhelp` and restart `xwinkeys`.
 
 ## Default keys
 
@@ -164,9 +190,9 @@ A binding is a modifier mask, an unshifted `XK_*` keysym, and a command line: `{
 
 | Key | Command |
 | --- | --- |
-| MOD+Shift+Return | `spawn xterm` |
+| MOD+Shift+Return | `spawn xxt` |
 | MOD+d | `spawn xwinmenu` |
-| MOD+F1 | `spawn xwinhelp` |
+| **MOD+F1** | `spawn xwinhelp` |
 | MOD+Return | `zoom` (focused window to master) |
 | MOD+q / MOD+Shift+q | `close` / `quit` |
 | MOD+j / MOD+k | `focus next` / `focus prev` |
@@ -182,6 +208,8 @@ A binding is a modifier mask, an unshifted `XK_*` keysym, and a command line: `{
 | MOD+1..9 | `view N` |
 | MOD+Shift+1..9 | `tag @ N` |
 
+Desktops (tags) are 1-9. There is no desktop 0.
+
 ## Floating windows
 
 Dialogs, splash screens, utility windows, anything with `WM_TRANSIENT_FOR`, and windows with a fixed size (min size equals max size) float on their own. Any other window floats with `float @`, or by grabbing it with the mouse.
@@ -192,26 +220,7 @@ Dialogs, splash screens, utility windows, anything with `WM_TRANSIENT_FOR`, and 
 - Move and resize keep at least 40 px of the window on screen. Resizing respects the program's min and max size.
 - The router remembers each window's floating geometry. Tile it and float it again and it comes back where it was.
 
-## Creator's settings patch
-
-`apply_creator_patches.sh` patches `config.h` to a minimal setup: tile layout only, black and white, terminal is `xxt`. Run it in the source directory, then `make xwinkeys` and restart `xwinkeys`.
-
-`MOD` is Super.
-
-| Key | Action |
-| --- | --- |
-| MOD+Enter | launch terminal (`xxt`) |
-| MOD+q | close focused window |
-| MOD+Shift+q | exit |
-| MOD+j / MOD+k | focus left / right window |
-| MOD+Shift+l / MOD+Shift+h | increase / decrease window size |
-| MOD+[1-9] | switch to desktop |
-| MOD+Shift+[1-9] | move focused window to desktop |
-| MOD+p | launch `xwinmenu` |
-
-Desktops are 1-9 (the router supports `1..9`, there is no desktop 0).
-
-## xwinbar
+## xwinbar and xwinnotify
 
 ```
 xwinbar [-b] [-a l|c|r] [-f font] [-B RRGGBB] [-F RRGGBB] [-p pad] [-i fifo] [-t secs] [FIFO]
@@ -225,14 +234,6 @@ The bar reads lines from a FIFO (default `$XDG_RUNTIME_DIR/xwinbar.fifo`, else `
 | `!text` | notification, shown for `-t` seconds, then the status returns |
 | `!` | clears the notification now |
 
-`xwinnotify "build finished"` is a one-line wrapper that writes `!build finished`. The optional `FIFO` argument is the path to read from (same as `-i`; it wins if both are given). Point a status script at it, like `xwinbar.sh > "$bfifo" &`. The example `xwinbar.sh` shows date, time and battery:
-
-```
-Mon 23 Nov  06:46  BAT 73%-
-```
-
-`+` charging, `-` discharging, `=` full. Nothing is shown without a battery.
-
 | Option | Meaning |
 | --- | --- |
 | `-b` | bar at the bottom (default: top) |
@@ -240,12 +241,18 @@ Mon 23 Nov  06:46  BAT 73%-
 | `-f font` | core X font (default `fixed`; list with `xlsfonts`) |
 | `-B` / `-F` | background / text color, hex (default `000000` / `ffffff`) |
 | `-p pad` | vertical padding in pixels (default 3) |
-| `-i fifo` | FIFO path, same as the `FIFO` argument (`xwinnotify` follows `$XWINBAR_FIFO`) |
+| `-i fifo` | FIFO path, same as the `FIFO` argument (the argument wins if both are given) |
 | `-t secs` | notification time (default 5) |
 
-The bar is a dock window with `_NET_WM_STRUT_PARTIAL`. The router shrinks the work area and the composer lays windows out around it. Core X fonts are Latin-1 only. The FIFO is opened read-write so writers closing it never end the bar's input.
+The example script `xwinbar.sh` prints date, time and battery, one line every 5 seconds:
 
-Your own source is anything that writes lines: `while :; do uptime; sleep 10; done > "$bfifo" &`, or `echo '!disk full' > $XDG_RUNTIME_DIR/xwinbar.fifo`.
+```
+Mon 23 Nov  06:46  BAT 73%-
+```
+
+`+` charging, `-` discharging, `=` full. Nothing is shown without a battery. Run it as `xwinbar.sh > "$bfifo" &`, or use any source that writes lines: `while :; do uptime; sleep 10; done > "$bfifo" &`.
+
+The bar is a dock window with `_NET_WM_STRUT_PARTIAL`: the router shrinks the work area and the composer lays windows out around it. Core X fonts are Latin-1 only. The FIFO is opened read-write, so writers closing it never end the bar's input. Do not run two bars on the same FIFO; give the second one its own `-i`.
 
 ### xwinnotify
 
@@ -253,7 +260,7 @@ Your own source is anything that writes lines: `while :; do uptime; sleep 10; do
 xwinnotify [MESSAGE...]
 ```
 
-Shows MESSAGE in the bar for `-t` seconds (default 5), then the status line comes back. It joins its arguments with spaces and writes `!MESSAGE` to the bar's FIFO. With no arguments it writes `!`, which clears the current notification at once.
+Shows MESSAGE in the bar for `-t` seconds, then the status line comes back. It joins its arguments with spaces and writes `!MESSAGE` to the bar's FIFO. With no arguments it writes `!` and clears the notification.
 
 ```
 xwinnotify "build finished"
@@ -262,12 +269,11 @@ xwinnotify                     # clear
 ```
 
 - A new notification replaces the one showing. There is no queue.
-- It only sends notifications. To change the status line, write a plain line to the FIFO (see below).
-- It uses `$XWINBAR_FIFO` if set, else the same default path as the bar. If you started the bar with `-i path`, `export XWINBAR_FIFO=path`.
+- It uses `$XWINBAR_FIFO` if set, else the bar's default path. If you started the bar with `-i path`, `export XWINBAR_FIFO=path`.
 - It exits with an error if the FIFO does not exist, which usually means the bar is not running.
 - It opens the FIFO read-write, so it never hangs waiting for a reader.
 
-Use it from anything: `make && xwinnotify done || xwinnotify build FAILED`, a cron job, a key binding (`spawn xwinnotify hello` in `config.h`).
+Use it from anything: `make && xwinnotify done || xwinnotify build FAILED`, a cron job, or a key binding (`{ MOD, XK_n, "spawn xwinnotify hello" }`).
 
 ## xwinmenu
 
@@ -275,7 +281,7 @@ Use it from anything: `make && xwinnotify done || xwinnotify build FAILED`, a cr
 xwinmenu
 ```
 
-A simple program launcher. It lists every executable found in `$PATH`, sorted, in a box in the centre of the screen. Type to filter, press Enter to launch. It takes no options: its settings are at the top of `xwinmenu.c`. Edit, then `make xwinmenu`.
+A program launcher. It lists every executable in `$PATH`, sorted, in a box in the centre of the screen. Type to filter, press Enter to launch. It takes no options: its settings are at the top of `xwinmenu.c`. Edit, then `make xwinmenu`.
 
 | Setting | Meaning |
 | --- | --- |
@@ -295,36 +301,46 @@ A simple program launcher. It lists every executable found in `$PATH`, sorted, i
 | Enter | run the selected entry; if nothing matches, run the typed text through `sh -c` |
 | Escape, Ctrl-c | quit |
 
-How it works:
-
-- At startup it scans `$PATH` and writes the names to a temp file in `/tmp`. The file is removed on exit.
-- On every keystroke it runs `SEARCH_TOOL -i -F -e QUERY FILE` and shows the output. Any grep-compatible tool works. The match is case-insensitive and literal, not a regular expression. With an empty query the whole list is shown.
+- At startup it scans `$PATH` and writes the names to a temp file in `/tmp`, removed on exit.
+- On every keystroke it runs `SEARCH_TOOL -i -F -e QUERY FILE` and shows the output. Any grep-compatible tool works. The match is case-insensitive and literal, not a regular expression.
 - The window is override-redirect, so `xwinrouter` does not manage or tile it. It grabs the keyboard while open.
 - Launched programs are detached (`setsid`), so they keep running after the menu closes.
-- It is bound to MOD+d in `config.h`: `{ MOD, XK_d, "spawn xwinmenu" }`. It can also be started by hand: `echo "spawn xwinmenu" > $rt/xwr.fifo`.
 
-Limits: no history, no descriptions, no mouse, no `.desktop` entries, no UTF-8 (core X fonts are Latin-1 only), and the list is read once when the menu opens.
+Limits: no history, no descriptions, no mouse, no `.desktop` entries, no UTF-8, and the list is read once when the menu opens.
 
-## Sending lines by hand
+## xwinhelp
 
-There are two FIFOs. Both take one command per line, and both can be written with plain `echo`.
+```
+xwinhelp [-p]
+```
+
+Shows the key bindings and settings that are really in your `config.h`. The text is generated by the program itself from the `keys[]` and `settings[]` tables, so it cannot go out of date. Rebuild `xwinhelp` after editing `config.h`.
+
+- It writes the text to `help.txt` in `$XDG_RUNTIME_DIR` (else `/tmp`) and shows it in a window. The file is created readable by the owner only and symlinks are refused.
+- `-p` prints the text on stdout and opens no window.
+- The window is a normal dialog: the router floats and centres it, and MOD+q closes it like any other window.
+- Keys in the window: `q`, Escape or Ctrl-c close; `j`/`k` and Up/Down scroll one line; Space/PageDown and PageUp scroll a page; Home and End jump.
+- It needs nothing beyond what the other programs need: xcb, the keysym header and the `fixed` font. Font and colors are set at the top of `xwinhelp.c`.
+- Bound to MOD+F1 in `config.h`: `{ MOD, XK_F1, "spawn xwinhelp" }`.
+
+## Talking to the router
+
+There are two FIFOs. Both take one command per line and can be written with plain `echo`.
 
 | FIFO | Path | Read by | Gets |
 | --- | --- | --- | --- |
-| router | `${XDG_RUNTIME_DIR:-/tmp}/xwr.fifo` (made by `~/.xinitrc`) | `xwinrouter` | window manager commands, see [Commands](#commands) |
-| bar | `${XDG_RUNTIME_DIR:-/tmp}/xwinbar.fifo` (made by `xwinbar`, or by `~/.xinitrc`) | `xwinbar` | status lines and notifications |
+| router | `${XDG_RUNTIME_DIR:-/tmp}/xwr.fifo` (made by `~/.xinitrc`) | `xwinrouter` | window manager commands |
+| bar | `${XDG_RUNTIME_DIR:-/tmp}/xwinbar.fifo` (made by `xwinbar` or `~/.xinitrc`) | `xwinbar` | status lines and notifications |
 
 ```sh
 rt=${XDG_RUNTIME_DIR:-/tmp}
 
-# router: any command from the Commands table
 echo "view 2"        > $rt/xwr.fifo
 echo "layout mono"   > $rt/xwr.fifo      # unknown to the router, forwarded to the composer
 echo "set gap 6"     > $rt/xwr.fifo
 echo "spawn xterm"   > $rt/xwr.fifo
 echo "close"         > $rt/xwr.fifo      # focused window
 
-# bar: status line, notification, clear
 echo "my status"     > $rt/xwinbar.fifo  # stays until replaced
 echo "!look at me"   > $rt/xwinbar.fifo  # shown for -t seconds
 echo "!"             > $rt/xwinbar.fifo  # clear the notification
@@ -332,18 +348,13 @@ echo "!"             > $rt/xwinbar.fifo  # clear the notification
 
 Several lines in one write work too: `printf 'a\nb\n!c\n' > $rt/xwinbar.fifo`.
 
-Notes:
+- A line written in one `write` of up to 4096 bytes is not mixed with another writer's.
+- Bar limits: text is cut at 255 characters, control characters become spaces, a line over 1023 bytes is dropped.
+- If the program reading a FIFO is not running, a plain `echo > fifo` can wait forever. To never wait, open it read-write: `echo "!hi" 1<> $rt/xwinbar.fifo` (what `xwinnotify` does). The bar removes its FIFO on a normal exit, so a missing FIFO means the bar is not running; after a crash a stale one can remain.
 
-- Lines are plain text, one per line, ended by a newline. Several programs can write at once; a line written in one `write` of up to 4096 bytes is not mixed with another writer's.
-- Bar limits: text is cut at 255 characters, control characters become spaces, a line over 1023 bytes is dropped. Core X fonts are Latin-1 only, so other characters will look wrong.
-- Router limits: see the note under [Commands](#commands).
-- If the program that reads a FIFO is not running, a plain `echo > fifo` can wait forever for a reader. Check that the bar or router is up first. To make a write to the bar's FIFO never wait, open it read-write: `echo "!hi" 1<> $rt/xwinbar.fifo` (this is what `xwinnotify` does). The bar removes its FIFO when it exits normally, so a missing FIFO means the bar is not running; after a crash a stale one can be left behind.
-- Do not run two bars on the same FIFO path; give the second one its own `-i`.
-- To watch what the router sends back (events), run it from a terminal: `xwinrouter < fifo | tee /dev/stderr | xwincomposer > fifo`, or write `dump` to the router FIFO and read its stdout.
+### Commands
 
-## Commands
-
-Written to the router FIFO, read by `xwinrouter`. `ID` is hex such as `0x400003`, or `@` for the focused window.
+Written to the router FIFO. `ID` is hex such as `0x400003`, or `@` for the focused window.
 
 | Command | Effect |
 | --- | --- |
@@ -364,9 +375,9 @@ Written to the router FIFO, read by `xwinrouter`. `ID` is hex such as `0x400003`
 | `quit` | exit |
 | anything else | forwarded as a `bind LINE` event |
 
-Keep lines under 512 bytes (1000 for `spawn`). Lines up to 4096 bytes are written atomically, so several writers can share the FIFO.
+Keep lines under 512 bytes (1000 for `spawn`).
 
-## Events
+### Events
 
 Printed by `xwinrouter` on stdout.
 
@@ -382,32 +393,28 @@ activate ID             desktop N           bind LINE
 - `activate`, `desktop`: EWMH requests from other programs
 - `dump` replies with the remembered `bind set ...` lines, then `workarea`, `view`, one `map` per window, and a final `focus`
 
-## xwincomposer
+To watch events live: `xwinrouter < fifo | tee /dev/stderr | xwincomposer > fifo`.
+
+### xwincomposer
 
 ```
 xwincomposer [-l layout] [-r master%] [-n nmaster] [-g gap]
 ```
 
-The options only set defaults until `xwinkeys` sends its settings. At runtime it handles these `bind` lines: `set ...`, `layout NAME|next`, `ratio +N|-N`, `master +N|-N`, `gap +N|-N`, `zoom`.
+The options only set defaults until `xwinkeys` sends its settings. At runtime it handles these `bind` lines: `set ...`, `layout NAME|next`, `ratio +N|-N`, `master +N|-N`, `gap +N|-N`, `zoom`. Floating and fullscreen windows are not tiled. On startup it sends `dump`, so it can be restarted alone without losing windows.
 
-Floating and fullscreen windows are not tiled. On startup it sends `dump`, so it can be restarted alone without losing windows.
+## Writing your own parts
 
-### Writing your own
-
-Any program works if it prints `dump` first, reads the events above, and prints `geom`, `focus` and `raise` commands. Replace `xwincomposer` to change the policy completely. Likewise `xwinkeys`: anything that writes command lines into the FIFO can replace it.
-
-## Minimal examples
-
-Two bare replacements, to show how little a part needs to be.
+Any program works as the composer if it prints `dump` first, reads the events above, and prints `geom`, `focus` and `raise` commands. Likewise for `xwinkeys`: anything that writes command lines into the FIFO can replace it.
 
 ### A composer in 36 lines of sh
 
-Master column on the left, everything else stacked on the right. It ignores tags, fullscreen, settings and layouts. Floating windows are left alone. It prints `dump` first, reads events, prints commands, and nothing else.
+Master column on the left, the rest stacked on the right. It ignores tags, fullscreen, settings and layouts, and leaves floating windows alone.
 
 ```sh
 #!/bin/sh
 # Bare composer: master column on the left, the rest stacked on the right.
-# Ignores tags, fullscreen and layouts. Usage: xwinrouter < fifo | ./composer.sh > fifo
+# Usage: xwinrouter < fifo | ./composer.sh > fifo
 wins= x=0 y=0 w=800 h=600
 
 relayout() {
@@ -443,20 +450,15 @@ while read -r ev a b c d; do
 done
 ```
 
-Use it by replacing the last line of `~/.xinitrc`:
-
-```sh
-xwinrouter < "$fifo" | ./composer.sh > "$fifo"
-```
+Use it by replacing the last line of `~/.xinitrc`: `xwinrouter < "$fifo" | ./composer.sh > "$fifo"`
 
 ### A key program in 56 lines of C
 
-Grabs five Super shortcuts and prints the command bound to each, one line per press. It sends no settings, so the router and composer run on their defaults. Caps Lock and Num Lock are not handled: with either on, the shortcuts do not fire.
+Grabs five Super shortcuts and prints the command bound to each. It sends no settings, so the router and composer run on their defaults. Caps Lock and Num Lock are not handled: with either on, the shortcuts do not fire.
 
 ```c
 /* Bare xwinkeys: grabs Super+key, prints the bound command as one line.
- * cc -o xwinkeys xwinkeys.c -lxcb      (needs X11/keysym.h, header only)
- * Does not handle Caps Lock / Num Lock and sends no settings. */
+ * cc -o xwinkeys xwinkeys.c -lxcb      (needs X11/keysym.h, header only) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <xcb/xcb.h>
@@ -512,9 +514,16 @@ int main(void)
 }
 ```
 
-```
-cc -o xwinkeys xwinkeys.c -lxcb
-```
+Run it like the real one: `./xwinkeys > "$fifo" &`. A shell script that does `echo "view 2" > "$fifo"` would do just as well.
 
-Run it like the real one: `./xwinkeys > "$fifo" &`. Any program that writes the same lines would do, including a shell script: `echo "view 2" > "$fifo"`.
+## Troubleshooting
 
+| Symptom | Check |
+| --- | --- |
+| Keys do nothing | Is `xwinkeys` running and writing into the router's FIFO? Rebuilt and restarted after editing `config.h`? Caps Lock / Num Lock are handled by the real `xwinkeys`, but not by the 56-line example. |
+| Windows open but are not tiled | The composer is not running or not connected: the last line of `~/.xinitrc` must pipe the router into it and back into the FIFO. |
+| `echo > fifo` hangs | Nothing is reading that FIFO. Start the router (or the bar) first. |
+| No bar notifications | `xwinnotify` needs the bar's FIFO. Set `XWINBAR_FIFO` if you started the bar with `-i`. |
+| MOD+F1 does nothing | `xwinhelp` is not in `$PATH`, or `xwinkeys` was built before the binding was added. |
+| Help is out of date | Rebuild `xwinhelp` after editing `config.h`. |
+| `xwinmenu` / `xwinhelp`: cannot open font | Pick another core font from `xlsfonts` and set `FONT` in the source. |
