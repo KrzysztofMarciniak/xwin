@@ -46,6 +46,7 @@ static const char *settings[] = {
 static const struct key keys[] = {
 	{ MOD | SHIFT, XK_Return, "spawn xxt" },
 	{ MOD,         XK_d,      "spawn xwinmenu"},
+	{ MOD,         XK_F1,     "spawn xwinhelp" },
 	{ MOD,         XK_Return, "zoom" },
 	{ MOD,         XK_q,      "close" },
 	{ MOD | SHIFT, XK_q,      "quit" },

@@ -10,6 +10,7 @@ Small programs, plain text, one job each. Written in C89, linked only against `l
 | `xwincomposer` | Layout and focus policy. Reads router events, writes router commands. |
 | `xwinkeys` | Key bindings and **the only configuration**. Sends its settings at startup, then turns key presses into commands. |
 | `xwinbar` | Status bar. Reads lines from a FIFO: status lines and `!notifications`. |
+| `xwinhelp` | Help viewer. Generates the key and settings list from `config.h`, writes `help.txt` and shows it in a window. MOD+F1. |
 | `xwinmenu` | Program launcher, a dmenu alternative. Lists the executables in `$PATH` in the centre of the screen. |
 
 
@@ -165,6 +166,7 @@ A binding is a modifier mask, an unshifted `XK_*` keysym, and a command line: `{
 | --- | --- |
 | MOD+Shift+Return | `spawn xterm` |
 | MOD+d | `spawn xwinmenu` |
+| MOD+F1 | `spawn xwinhelp` |
 | MOD+Return | `zoom` (focused window to master) |
 | MOD+q / MOD+Shift+q | `close` / `quit` |
 | MOD+j / MOD+k | `focus next` / `focus prev` |
